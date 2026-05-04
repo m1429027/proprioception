@@ -23,6 +23,7 @@ class AppMode(Enum):
     IDLE = auto()
     MEASUREMENT = auto()
     PRACTICE = auto()
+    EXAM = auto()
 
 
 @dataclass
@@ -75,6 +76,20 @@ class DetectionResult:
     radius: float = 0.0
     area: float = 0.0
     in_screen_bounds: bool = False
+
+
+@dataclass
+class ExamPointRecord:
+    x: int
+    y: int
+    time_s: float
+
+
+@dataclass
+class ExamTrialRecord:
+    trial_index: int
+    points: list[ExamPointRecord] = field(default_factory=list)
+    total_time_s: float = 0.0
 
 
 @dataclass
@@ -173,6 +188,15 @@ class AppState:
     filtered_path_points: list[Point] = field(default_factory=list)
     practice_segment_start: int = 1
     practice_segment_end: int = 1
+    exam_total_trials: int = 0
+    exam_current_trial: int = 0
+    exam_recording: bool = False
+    exam_trial_start_time: Optional[float] = None
+    measurement_last_sample_time: Optional[float] = None
+    exam_last_sample_time: Optional[float] = None
+    exam_current_points: list[ExamPointRecord] = field(default_factory=list)
+    exam_trials: list[ExamTrialRecord] = field(default_factory=list)
+    last_exam_file: Optional[Path] = None
     last_path_file: Optional[Path] = None
     latest_message: str = ""
     csv_path: Optional[Path] = None

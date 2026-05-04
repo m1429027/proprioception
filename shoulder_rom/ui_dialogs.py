@@ -31,35 +31,40 @@ class DialogService:
             parent=self.root,
         )
 
-    def ask_practice_segment_range(
+    def ask_practice_segment_end(
         self,
-        current_start: int,
         current_end: int,
         max_segments: int,
-    ) -> Optional[tuple[int, int]]:
-        start_segment = simpledialog.askinteger(
+    ) -> Optional[int]:
+        return simpledialog.askinteger(
             "Practice Range",
-            "Enter the first segment to display:",
-            initialvalue=current_start,
+            "Enter which segment to display from START:",
+            initialvalue=current_end,
             minvalue=1,
             maxvalue=max_segments,
             parent=self.root,
         )
-        if start_segment is None:
-            return None
 
-        end_segment = simpledialog.askinteger(
-            "Practice Range",
-            "Enter the last segment to display:",
-            initialvalue=max(current_end, start_segment),
-            minvalue=start_segment,
-            maxvalue=max_segments,
+    def ask_exam_trial_count(self, current_value: int = 3) -> Optional[int]:
+        return simpledialog.askinteger(
+            "Exam Settings",
+            "Enter how many trials to record:",
+            initialvalue=current_value,
+            minvalue=1,
             parent=self.root,
         )
-        if end_segment is None:
-            return None
 
-        return start_segment, end_segment
+    def choose_exam_xlsx_path(self, initial_dir: Optional[Path] = None) -> Optional[Path]:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = filedialog.asksaveasfilename(
+            title="Choose exam Excel file",
+            initialdir=str(initial_dir) if initial_dir else None,
+            initialfile="exam_trials_{0}.xlsx".format(timestamp),
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            parent=self.root,
+        )
+        return Path(path) if path else None
 
     def choose_csv_path(self, initial_dir: Optional[Path] = None) -> Optional[Path]:
         timestamp = datetime.now().strftime("%Y%m%d")

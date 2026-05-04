@@ -13,6 +13,7 @@ class CameraConfig:
     camera_id: int = 0
     frame_width: int = 1280
     frame_height: int = 720
+    target_fps: float = 30.0
     disable_autofocus: bool = True
 
 
@@ -44,6 +45,11 @@ class PathConfig:
     resample_points: int = 120
 
 
+@dataclass(frozen=True)
+class ExamConfig:
+    output_directory: Path = Path("data/exams")
+
+
 @dataclass
 class TrackbarDefaults:
     exposure: int = 6
@@ -69,6 +75,7 @@ class AppConfig:
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     settings: SettingsConfig = field(default_factory=SettingsConfig)
     paths: PathConfig = field(default_factory=PathConfig)
+    exams: ExamConfig = field(default_factory=ExamConfig)
     trackbars: TrackbarDefaults = field(default_factory=TrackbarDefaults)
     default_scale_cm: float = 50.0
     csv_encoding: str = "utf-8-sig"

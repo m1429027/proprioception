@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Optional
 
 import cv2
@@ -14,6 +15,8 @@ from .models import (
     AppState,
     ControlPanelLayout,
     DetectionResult,
+    ExamPointRecord,
+    ExamTrialRecord,
     MeasurementPhase,
     MeasurementRecord,
     PathCaptureRecord,
@@ -25,6 +28,7 @@ from .storage import (
     append_measurement_record,
     load_camera_settings,
     load_homography,
+    save_exam_trials_workbook,
     save_path_capture,
     save_camera_settings,
     save_homography,
@@ -46,6 +50,7 @@ def nothing(_: int) -> None:
 TOOLBAR_ACTION_MESSAGES = {
     "measurement": ("Measurement mode enabled.", "Measurement mode disabled."),
     "practice": ("Practice mode enabled.", "Practice mode disabled."),
+    "exam": ("Exam mode enabled.", "Exam mode disabled."),
     "practice_range": ("Practice range updated.", None),
     "calibrate": ("Calibration mode enabled.", "Calibration mode disabled."),
     "reset": ("Start and end points cleared.", None),
@@ -56,6 +61,8 @@ TOOLBAR_ACTION_MESSAGES = {
     "borderless": ("Projector window borderless mode toggled.", None),
     "settings": ("Camera settings opened.", "Camera settings hidden."),
 }
+
+SAMPLING_INTERVAL_EPSILON = 1e-6
 
 
 class ShoulderMeasurementApp:
@@ -98,6 +105,7 @@ class ShoulderMeasurementApp:
     def _configure_camera(self) -> None:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.camera.frame_width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.camera.frame_height)
+        self.cap.set(cv2.CAP_PROP_FPS, self.config.camera.target_fps)
         if self.config.camera.disable_autofocus:
             self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
 
@@ -111,7 +119,7 @@ class ShoulderMeasurementApp:
     def run(self) -> None:
         print("=== Shoulder Laser Projection Measurement System ===")
         print("Space: mark start/end | Q: quit")
-        print("Toolbar: Measure | Practice | Range | Calibrate | Reset | Save CSV | Scale | Split | Full | Border | Settings")
+        print("Toolbar: Measure | Practice | Exam | Range | Calibrate | Reset | Save CSV | Scale | Split | Full | Border | Settings")
         print("Fallback shortcuts: C = calibrate, R = reset")
 
         try:
@@ -131,6 +139,7 @@ class ShoulderMeasurementApp:
                 )
                 self.state.detection = detection
                 self._capture_measurement_path_point()
+                self._capture_exam_trial_point()
 
                 if self.state.calibrating:
                     self._update_calibration(gray_frame)
@@ -205,6 +214,9 @@ class ShoulderMeasurementApp:
         if action == "practice":
             self.toggle_practice_mode()
             return
+        if action == "exam":
+            self.toggle_exam_mode()
+            return
         if action == "practice_range":
             self.update_practice_range()
             return
@@ -273,7 +285,10 @@ class ShoulderMeasurementApp:
             self._handle_toolbar_action("reset")
             return True
         if key == ord(" "):
-            self.mark_current_point()
+            if self.state.mode == AppMode.EXAM:
+                self.handle_exam_action()
+            else:
+                self.mark_current_point()
             return True
         return True
 
@@ -286,8 +301,35 @@ class ShoulderMeasurementApp:
         point = self.state.detection.screen_point
         if point is None:
             return
+        now = perf_counter()
+        if not self._sampling_due(self.state.measurement_last_sample_time, now):
+            return
+        self.state.measurement_last_sample_time = now
         if not self.state.raw_path_points or self.state.raw_path_points[-1] != point:
             self.state.raw_path_points.append(point)
+
+    def _capture_exam_trial_point(self) -> None:
+        if self.state.mode != AppMode.EXAM or not self.state.exam_recording:
+            return
+        if self.state.exam_trial_start_time is None:
+            return
+
+        point = self.state.detection.screen_point
+        if point is None:
+            return
+
+        now = perf_counter()
+        if not self._sampling_due(self.state.exam_last_sample_time, now):
+            return
+        self.state.exam_last_sample_time = now
+        elapsed = now - self.state.exam_trial_start_time
+        self.state.exam_current_points.append(
+            ExamPointRecord(
+                x=point[0],
+                y=point[1],
+                time_s=elapsed,
+            )
+        )
 
     def reset_measurement(self) -> None:
         self.state.start_point = None
@@ -297,7 +339,14 @@ class ShoulderMeasurementApp:
         self.state.raw_path_points = []
         self.state.filtered_path_points = []
         self.state.last_path_file = None
+        self._reset_exam_state()
         self.state.latest_message = "Start and end points cleared."
+
+    def _sampling_due(self, last_sample_time: Optional[float], now: float) -> bool:
+        if last_sample_time is None:
+            return True
+        interval = 1.0 / max(self.config.camera.target_fps, 1.0)
+        return (now - last_sample_time) + SAMPLING_INTERVAL_EPSILON >= interval
 
     def update_scale(self) -> None:
         new_scale = self.dialogs.ask_scale_cm(self.state.scale_cm)
@@ -325,8 +374,7 @@ class ShoulderMeasurementApp:
             self.state.latest_message = "No measured path is available for practice."
             return
 
-        selected = self.dialogs.ask_practice_segment_range(
-            self.state.practice_segment_start,
+        selected = self.dialogs.ask_practice_segment_end(
             self.state.practice_segment_end,
             self.state.segment_count,
         )
@@ -334,9 +382,9 @@ class ShoulderMeasurementApp:
             self.state.latest_message = "Practice range update canceled."
             return
 
-        self.state.practice_segment_start, self.state.practice_segment_end = selected
-        self.state.latest_message = "Practice range updated: segment {0} to {1}.".format(
-            self.state.practice_segment_start,
+        self.state.practice_segment_start = 1
+        self.state.practice_segment_end = selected
+        self.state.latest_message = "Practice range updated: START to segment {0}.".format(
             self.state.practice_segment_end,
         )
 
@@ -352,9 +400,11 @@ class ShoulderMeasurementApp:
             return
 
         self.state.mode = AppMode.MEASUREMENT
+        self._reset_exam_state()
         self.state.phase = MeasurementPhase.IDLE
         self.state.start_point = None
         self.state.end_point = None
+        self.state.measurement_last_sample_time = None
         self.state.raw_path_points = []
         self.state.filtered_path_points = []
         self.state.practice_segment_start = 1
@@ -372,7 +422,74 @@ class ShoulderMeasurementApp:
             return
 
         self.state.mode = AppMode.PRACTICE
+        self._reset_exam_state()
         self.state.latest_message = TOOLBAR_ACTION_MESSAGES["practice"][0]
+
+    def toggle_exam_mode(self) -> None:
+        if self.state.mode == AppMode.EXAM:
+            self.state.mode = AppMode.IDLE
+            self._reset_exam_state()
+            self.state.latest_message = TOOLBAR_ACTION_MESSAGES["exam"][1]
+            return
+
+        if not self.state.filtered_path_points:
+            self.state.latest_message = "No measured path is available for exam."
+            return
+
+        trial_count = self.dialogs.ask_exam_trial_count(3)
+        if trial_count is None:
+            self.state.latest_message = "Exam mode canceled."
+            return
+
+        self.state.mode = AppMode.EXAM
+        self.state.raw_path_points = []
+        self._reset_exam_state()
+        self.state.exam_total_trials = trial_count
+        self.state.exam_current_trial = 1
+        self.state.latest_message = "Exam mode enabled. Trial 1 of {0} is ready.".format(trial_count)
+
+    def handle_exam_action(self) -> None:
+        if self.state.mode != AppMode.EXAM:
+            self.state.latest_message = "Enable Exam mode before recording trials."
+            return
+
+        if self.state.exam_total_trials <= 0 or self.state.exam_current_trial <= 0:
+            self.state.latest_message = "No exam session is active."
+            return
+
+        if not self.state.exam_recording:
+            self.state.exam_recording = True
+            self.state.exam_current_points = []
+            self.state.exam_trial_start_time = perf_counter()
+            self.state.exam_last_sample_time = None
+            self._capture_exam_trial_point()
+            self.state.latest_message = "Exam trial {0} recording started.".format(self.state.exam_current_trial)
+            return
+
+        total_time = 0.0
+        if self.state.exam_trial_start_time is not None:
+            total_time = perf_counter() - self.state.exam_trial_start_time
+        self._capture_exam_trial_point()
+        trial_record = ExamTrialRecord(
+            trial_index=self.state.exam_current_trial,
+            points=self.state.exam_current_points[:],
+            total_time_s=total_time,
+        )
+        self.state.exam_trials.append(trial_record)
+        self.state.exam_recording = False
+        self.state.exam_trial_start_time = None
+        self.state.exam_current_points = []
+
+        if self.state.exam_current_trial >= self.state.exam_total_trials:
+            self._finalize_exam_session()
+            return
+
+        completed_trial = self.state.exam_current_trial
+        self.state.exam_current_trial += 1
+        self.state.latest_message = "Exam trial {0} complete. Trial {1} is ready.".format(
+            completed_trial,
+            self.state.exam_current_trial,
+        )
 
     def mark_current_point(self) -> None:
         if self.state.mode != AppMode.MEASUREMENT:
@@ -388,6 +505,7 @@ class ShoulderMeasurementApp:
             self.state.start_point = point
             self.state.end_point = None
             self.state.phase = MeasurementPhase.START_MARKED
+            self.state.measurement_last_sample_time = None
             self.state.raw_path_points = [point]
             self.state.filtered_path_points = []
             self.state.latest_message = f"Start point marked: {point}."
@@ -405,6 +523,35 @@ class ShoulderMeasurementApp:
             return
 
         self.state.latest_message = "Measurement is already complete. Press R to reset."
+
+    def _finalize_exam_session(self) -> None:
+        default_path = self.config.exams.output_directory / "exam_trials_{0}.xlsx".format(
+            datetime.now().strftime("%Y%m%d_%H%M%S")
+        )
+        chosen_path = self.dialogs.choose_exam_xlsx_path(self.config.exams.output_directory)
+        save_path = chosen_path if chosen_path is not None else default_path
+        self.state.last_exam_file = save_exam_trials_workbook(save_path, self.state.exam_trials)
+        trial_count = self.state.exam_total_trials
+        self.state.mode = AppMode.IDLE
+        self.state.exam_recording = False
+        self.state.exam_trial_start_time = None
+        self.state.exam_current_points = []
+        self.state.exam_current_trial = trial_count
+        self.state.latest_message = "Exam complete. Saved {0} trial(s) to {1}.".format(
+            trial_count,
+            self.state.last_exam_file.name,
+        )
+
+    def _reset_exam_state(self) -> None:
+        self.state.exam_total_trials = 0
+        self.state.exam_current_trial = 0
+        self.state.exam_recording = False
+        self.state.exam_trial_start_time = None
+        self.state.measurement_last_sample_time = None
+        self.state.exam_last_sample_time = None
+        self.state.exam_current_points = []
+        self.state.exam_trials = []
+        self.state.last_exam_file = None
 
     def _finalize_measurement_path(self) -> None:
         if len(self.state.raw_path_points) < 2:

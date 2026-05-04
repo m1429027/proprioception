@@ -9,6 +9,9 @@ import numpy as np
 from .config import CalibrationConfig, ScreenConfig
 from .models import DetectionResult, TrackbarValues
 
+RED_DOMINANCE_DELTA = 25
+AREA_IDEAL_MULTIPLIER = 3.0
+
 
 def build_aruco() -> Tuple[cv2.aruco.Dictionary, cv2.aruco.DetectorParameters]:
     dictionary = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
@@ -48,39 +51,131 @@ def detect_laser(
     homography_matrix: Optional[np.ndarray],
     screen: ScreenConfig,
 ) -> Tuple[DetectionResult, np.ndarray, np.ndarray]:
-    _, gray, hsv = preprocess_frame(frame, values.ignore_bottom)
+    processed, gray, hsv = preprocess_frame(frame, values.ignore_bottom)
 
     _, mask_bright = cv2.threshold(gray, values.min_brightness, 255, cv2.THRESH_BINARY)
     lower_red1, upper_red1 = np.array([0, 100, 100]), np.array([10, 255, 255])
     lower_red2, upper_red2 = np.array([160, 100, 100]), np.array([180, 255, 255])
-    mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
-    mask = cv2.bitwise_or(mask_bright, mask_red)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    mask_red_hsv = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return DetectionResult(), gray, mask
+    b_channel = processed[:, :, 0].astype(np.int16)
+    g_channel = processed[:, :, 1].astype(np.int16)
+    r_channel = processed[:, :, 2].astype(np.int16)
+    red_dominant = np.where(
+        (r_channel > g_channel + RED_DOMINANCE_DELTA)
+        & (r_channel > b_channel + RED_DOMINANCE_DELTA),
+        255,
+        0,
+    ).astype(np.uint8)
 
-    largest = max(contours, key=cv2.contourArea)
-    area = float(cv2.contourArea(largest))
-    if area <= values.min_area:
-        return DetectionResult(area=area), gray, mask
+    mask_red = cv2.bitwise_and(mask_red_hsv, red_dominant)
+    mask_core = cv2.bitwise_and(mask_red, mask_bright)
+    kernel = np.ones((3, 3), np.uint8)
+    mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_OPEN, kernel)
+    mask_core = cv2.morphologyEx(mask_core, cv2.MORPH_OPEN, kernel)
 
-    (cx, cy), radius = cv2.minEnclosingCircle(largest)
-    result = DetectionResult(camera_point=(cx, cy), radius=float(radius), area=area)
+    result = detect_best_candidate(processed, gray, mask_core, values)
+    selected_mask = mask_core
+    if result.camera_point is None:
+        result = detect_best_candidate(processed, gray, mask_red, values)
+        selected_mask = mask_red
+
+    if result.camera_point is None:
+        return DetectionResult(), gray, mask_red
 
     if homography_matrix is None:
-        return result, gray, mask
+        return result, gray, selected_mask
 
-    screen_point = camera_to_screen((cx, cy), homography_matrix)
+    screen_point = camera_to_screen(result.camera_point, homography_matrix)
     if screen_point is None:
-        return result, gray, mask
+        return result, gray, selected_mask
 
     sx, sy = screen_point
     in_bounds = 0 <= sx < screen.width and 0 <= sy < screen.height
     result.screen_point = screen_point if in_bounds else None
     result.in_screen_bounds = in_bounds
-    return result, gray, mask
+    return result, gray, selected_mask
+
+
+def detect_best_candidate(
+    frame: np.ndarray,
+    gray: np.ndarray,
+    mask: np.ndarray,
+    values: TrackbarValues,
+) -> DetectionResult:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return DetectionResult()
+
+    best_result: Optional[DetectionResult] = None
+    best_score = float("-inf")
+    ideal_area = max(float(values.min_area) * AREA_IDEAL_MULTIPLIER, float(values.min_area) + 1.0)
+
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area <= values.min_area:
+            continue
+
+        center = contour_center(contour)
+        if center is None:
+            continue
+
+        contour_mask = np.zeros_like(mask)
+        cv2.drawContours(contour_mask, [contour], -1, 255, -1)
+        mean_brightness = float(cv2.mean(gray, mask=contour_mask)[0])
+        mean_bgr = cv2.mean(frame, mask=contour_mask)
+        red_advantage = float(mean_bgr[2] - max(mean_bgr[1], mean_bgr[0]))
+
+        perimeter = float(cv2.arcLength(contour, True))
+        circularity = 0.0
+        if perimeter > 0.0:
+            circularity = float((4.0 * np.pi * area) / (perimeter * perimeter))
+
+        area_penalty = abs(area - ideal_area) / max(ideal_area, 1.0)
+        score = (
+            red_advantage * 4.0
+            + mean_brightness * 1.5
+            + circularity * 60.0
+            - area_penalty * 50.0
+            - area * 0.2
+        )
+
+        candidate = DetectionResult(
+            camera_point=center,
+            radius=float(cv2.minEnclosingCircle(contour)[1]),
+            area=area,
+        )
+
+        if score > best_score:
+            best_result = candidate
+            best_score = score
+            continue
+
+        if (
+            best_result is not None
+            and abs(score - best_score) < 10.0
+            and mean_brightness >= values.min_brightness
+            and area < best_result.area
+        ):
+            best_result = candidate
+            best_score = score
+
+    return best_result if best_result is not None else DetectionResult()
+
+
+def contour_center(contour: np.ndarray) -> Optional[Tuple[float, float]]:
+    moments = cv2.moments(contour)
+    if moments["m00"] != 0:
+        return (
+            float(moments["m10"] / moments["m00"]),
+            float(moments["m01"] / moments["m00"]),
+        )
+
+    try:
+        (cx, cy), _ = cv2.minEnclosingCircle(contour)
+        return float(cx), float(cy)
+    except cv2.error:
+        return None
 
 
 def camera_to_screen(

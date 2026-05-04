@@ -10,9 +10,11 @@ env/
 .mypy_cache/
 
 data/paths/
+data/exams/
 data/settings/
 data/calibration/*.json
 data/samples/
 
 *.csv
 *.log
+*.xlsx
