@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -9,30 +10,46 @@ import numpy as np
 
 from .camera_panel import SETTING_SPECS
 from .config import CalibrationConfig, ScreenConfig
-from .models import AppMode, AppState, ControlPanelLayout, DetectionResult, MeasurementMetrics, MeasurementPhase, Point, Rect
+from .models import AppMode, AppState, ControlPanelLayout, MeasurementMetrics, MeasurementPhase, Point, Rect
 from .path_tools import sample_point_at_fraction, slice_path_by_percentage
 from .vision import calibration_marker_layout
 
 
-TOOLBAR_BUTTONS = [
-    ("measurement", "Measure"),
-    ("practice", "Practice"),
-    ("exam", "Exam"),
-    ("practice_range", "Range"),
-    ("calibrate", "Calibrate"),
-    ("reset", "Reset"),
-    ("save_csv", "Save CSV"),
-    ("scale", "Scale"),
-    ("segments", "Split"),
-    ("fullscreen", "Full"),
-    ("borderless", "Border"),
-    ("settings", "Settings"),
+MODE_TABS = [
+    ("initial", AppMode.INITIAL, "Init"),
+    ("measurement", AppMode.MEASUREMENT, "Measure"),
+    ("practice", AppMode.PRACTICE, "Practice"),
+    ("exam", AppMode.EXAM, "Exam"),
 ]
+
+MODE_ACTIONS = {
+    AppMode.INITIAL: [
+        ("calibrate", "Calibrate"),
+        ("settings", "Settings"),
+        ("scale", "Scale"),
+        ("fullscreen", "Full"),
+        ("borderless", "Border"),
+        ("subject_folder", "Subject"),
+    ],
+    AppMode.MEASUREMENT: [
+        ("reset_path", "Reset Path"),
+        ("split", "Split"),
+        ("save_path", "Save Path"),
+    ],
+    AppMode.PRACTICE: [
+        ("practice_range", "Range"),
+    ],
+    AppMode.EXAM: [
+        ("exam_range", "Range"),
+        ("reset_trial", "Reset Trial"),
+        ("save_exam", "Save Exam"),
+    ],
+}
 
 RAW_PATH_COLOR = (255, 170, 60)
 PROCESSED_PATH_COLOR = (255, 255, 0)
-PRACTICE_BASE_PATH_COLOR = (90, 90, 90)
-PRACTICE_SELECTED_PATH_COLOR = (255, 200, 80)
+REFERENCE_BASE_PATH_COLOR = (90, 90, 90)
+REFERENCE_SELECTED_PATH_COLOR = (255, 200, 80)
 
 
 def render_control_view(
@@ -54,7 +71,7 @@ def render_control_view(
 
     cv2.putText(control_view, f"Calibration: {'READY' if homography_ready else 'MISSING'}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
     cv2.putText(control_view, latest_message[:70], (20, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
-    layout = draw_toolbar_and_settings(control_view, state, width)
+    layout = draw_mode_tabs_and_actions(control_view, state, width)
     draw_measurement_prompt(control_view, state, width, height)
     draw_operator_help(control_view, state, width, height)
     return control_view, layout
@@ -72,7 +89,7 @@ def render_projector_view(
 
     draw_scale_bar(projector_view, screen, state.scale_cm)
     draw_measurement(projector_view, state, screen)
-    draw_practice(projector_view, state)
+    draw_reference_path_for_mode(projector_view, state)
     draw_crosshair(projector_view, state.detection.screen_point)
     return projector_view
 
@@ -132,21 +149,33 @@ def draw_measurement(projector_view: np.ndarray, state: AppState, screen: Screen
         draw_segment_markers(projector_view, path_points, state.segment_count)
 
 
-def draw_practice(projector_view: np.ndarray, state: AppState) -> None:
-    if state.mode not in (AppMode.PRACTICE, AppMode.EXAM):
-        return
+def draw_reference_path_for_mode(projector_view: np.ndarray, state: AppState) -> None:
     if len(state.filtered_path_points) < 2:
         return
 
-    draw_path_polyline(projector_view, state.filtered_path_points, PRACTICE_BASE_PATH_COLOR, 2)
+    if state.mode == AppMode.PRACTICE:
+        draw_reference_path(projector_view, state.filtered_path_points, state.segment_count, state.practice_segment_end)
+        return
+
+    if state.mode == AppMode.EXAM:
+        draw_reference_path(projector_view, state.filtered_path_points, state.segment_count, state.exam_segment_end)
+
+
+def draw_reference_path(
+    projector_view: np.ndarray,
+    path_points: list[Point],
+    segment_count: int,
+    segment_end: int,
+) -> None:
+    draw_path_polyline(projector_view, path_points, REFERENCE_BASE_PATH_COLOR, 2)
     selected_path = slice_path_by_percentage(
-        state.filtered_path_points,
-        state.segment_count,
-        state.practice_segment_start,
-        state.practice_segment_end,
+        path_points,
+        segment_count,
+        1,
+        segment_end,
     )
     if len(selected_path) >= 2:
-        draw_path_polyline(projector_view, selected_path, PRACTICE_SELECTED_PATH_COLOR, 4)
+        draw_path_polyline(projector_view, selected_path, REFERENCE_SELECTED_PATH_COLOR, 4)
 
 
 def draw_crosshair(projector_view: np.ndarray, point: Optional[Point]) -> None:
@@ -204,38 +233,57 @@ def compute_measurement_metrics(
     )
 
 
-def draw_toolbar_and_settings(control_view: np.ndarray, state: AppState, width: int) -> ControlPanelLayout:
+def draw_mode_tabs_and_actions(control_view: np.ndarray, state: AppState, width: int) -> ControlPanelLayout:
     layout = ControlPanelLayout()
     toolbar_x = 20
-    toolbar_y = 84
-    available_width = max(width - (toolbar_x * 2), 600)
-    gap = 6
-    button_w = max(56, min(82, int((available_width - gap * (len(TOOLBAR_BUTTONS) - 1)) / len(TOOLBAR_BUTTONS))))
-    button_h = 32
-    toolbar_width = len(TOOLBAR_BUTTONS) * (button_w + gap) - gap
-    draw_filled_rect(
-        control_view,
-        (toolbar_x - 8, toolbar_y - 12, toolbar_x + toolbar_width + 8, toolbar_y + button_h + 12),
-        (25, 25, 25),
-        0.78,
-    )
+    tab_y = 84
+    action_y = 126
+    gap = 8
+
+    tab_w = 88
+    tab_h = 30
+    draw_filled_rect(control_view, (toolbar_x - 8, tab_y - 10, min(width - 20, toolbar_x + 4 * (tab_w + gap)), tab_y + tab_h + 10), (25, 25, 25), 0.78)
 
     button_x = toolbar_x
-    for action, label in TOOLBAR_BUTTONS:
-        rect = (button_x, toolbar_y, button_x + button_w, toolbar_y + button_h)
-        layout.toolbar_button_rects[action] = rect
-        active = toolbar_button_active(action, state)
+    for action, mode, label in MODE_TABS:
+        rect = (button_x, tab_y, button_x + tab_w, tab_y + tab_h)
+        layout.mode_tab_rects[action] = rect
+        active = state.mode == mode
         color = (86, 120, 70) if active else (70, 70, 70)
         draw_filled_rect(control_view, rect, color, 0.92)
         cv2.rectangle(control_view, (rect[0], rect[1]), (rect[2], rect[3]), (220, 220, 220), 1)
-        cv2.putText(control_view, label, (rect[0] + 8, rect[1] + 21), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2)
-        button_x += button_w + gap
+        cv2.putText(control_view, label, (rect[0] + 12, rect[1] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (255, 255, 255), 2)
+        button_x += tab_w + gap
+
+    actions = MODE_ACTIONS[state.mode]
+    if actions:
+        action_button_w = 110 if len(actions) <= 3 else 96
+        action_button_h = 32
+        action_x = toolbar_x
+        background_right = action_x + len(actions) * (action_button_w + gap) - gap
+        draw_filled_rect(control_view, (action_x - 8, action_y - 10, background_right + 8, action_y + action_button_h + 10), (25, 25, 25), 0.78)
+        for action, label in actions:
+            rect = (action_x, action_y, action_x + action_button_w, action_y + action_button_h)
+            layout.action_button_rects[action] = rect
+            color = (70, 70, 70)
+            if action == "calibrate" and state.calibrating:
+                color = (86, 120, 70)
+            elif action == "fullscreen" and state.is_fullscreen:
+                color = (86, 120, 70)
+            elif action == "borderless" and state.is_borderless:
+                color = (86, 120, 70)
+            elif action == "settings" and state.camera_settings.panel_visible:
+                color = (86, 120, 70)
+            draw_filled_rect(control_view, rect, color, 0.92)
+            cv2.rectangle(control_view, (rect[0], rect[1]), (rect[2], rect[3]), (220, 220, 220), 1)
+            cv2.putText(control_view, label, (rect[0] + 8, rect[1] + 21), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2)
+            action_x += action_button_w + gap
 
     if not state.camera_settings.panel_visible:
         return layout
 
     panel_x1 = width - 340
-    panel_y1 = toolbar_y + button_h + 18
+    panel_y1 = action_y + 56
     panel_x2 = width - 20
     panel_y2 = panel_y1 + 42 + (len(SETTING_SPECS) * 48) + 14
     draw_filled_rect(control_view, (panel_x1, panel_y1, panel_x2, panel_y2), (30, 30, 30), 0.82)
@@ -268,14 +316,7 @@ def draw_toolbar_and_settings(control_view: np.ndarray, state: AppState, width: 
 
 def draw_measurement_prompt(control_view: np.ndarray, state: AppState, width: int, height: int) -> None:
     prompt = measurement_phase_text(state)
-    if state.mode == AppMode.MEASUREMENT:
-        hint = "Subject action: press Space once."
-    elif state.mode == AppMode.PRACTICE:
-        hint = "Subject action: follow the displayed path."
-    elif state.mode == AppMode.EXAM:
-        hint = "Subject action: press Space to start or stop a trial."
-    else:
-        hint = "Select Measure, Practice, or Exam from the toolbar."
+    hint = operator_hint_text(state)
     box_rect = (20, height - 92, min(width - 20, 430), height - 18)
     draw_filled_rect(control_view, box_rect, (28, 28, 28), 0.8)
     cv2.rectangle(control_view, (box_rect[0], box_rect[1]), (box_rect[2], box_rect[3]), (180, 180, 180), 1)
@@ -284,23 +325,38 @@ def draw_measurement_prompt(control_view: np.ndarray, state: AppState, width: in
 
 
 def draw_operator_help(control_view: np.ndarray, state: AppState, width: int, height: int) -> None:
-    lines = [
-        "Modes: Measure records a path. Practice shows the processed path.",
-        "Exam: Space starts and stops each trial, then saves to Excel.",
-        "Fallback keys: Space = action | C = calibrate | R = reset | Q = quit",
-        "Current split count: {0}".format(state.segment_count),
-        "Practice range: START to segment {0}".format(state.practice_segment_end),
-    ]
-    if state.mode == AppMode.EXAM or state.exam_total_trials > 0:
-        lines.append(
-            "Exam trial: {0}/{1} | Recording: {2}".format(
-                max(state.exam_current_trial, 0),
-                max(state.exam_total_trials, 0),
-                "YES" if state.exam_recording else "NO",
-            )
-        )
+    subject_line = "Subject folder: not set"
+    if state.subject_directory is not None:
+        subject_line = "Subject folder: {0}".format(state.subject_directory.name)
 
-    box_width = min(430, width - 40)
+    lines = [subject_line]
+    if state.mode == AppMode.INITIAL:
+        lines.extend([
+            "Initial mode: calibration, scale, projector window, and subject folder.",
+            "Use Settings to tune the camera only when needed.",
+        ])
+    elif state.mode == AppMode.MEASUREMENT:
+        lines.extend([
+            "Measurement: Space marks START, then END.",
+            "Reset Path clears only the measurement path.",
+            "Split changes how many equal sections divide the path.",
+        ])
+    elif state.mode == AppMode.PRACTICE:
+        lines.extend([
+            "Practice: Range shows START to the selected segment.",
+            "Follow the highlighted reference path on the projector.",
+            "Practice range: START to segment {0}".format(state.practice_segment_end),
+        ])
+    else:
+        lines.extend([
+            "Exam: Space starts and stops the current trial.",
+            "Reset Trial clears only the current trial in progress.",
+            "Save Exam exports the Excel file after all trials finish.",
+            "Exam range: START to segment {0}".format(state.exam_segment_end),
+            "Trial status: {0}".format(exam_status_line(state)),
+        ])
+
+    box_width = min(470, width - 40)
     box_height = 56 + len(lines) * 24
     box_rect = (20, height - box_height - 108, 20 + box_width, height - 108)
     draw_filled_rect(control_view, box_rect, (28, 28, 28), 0.8)
@@ -309,7 +365,7 @@ def draw_operator_help(control_view: np.ndarray, state: AppState, width: int, he
     for index, line in enumerate(lines):
         cv2.putText(
             control_view,
-            line[:92],
+            line[:98],
             (box_rect[0] + 14, box_rect[1] + 50 + index * 24),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -320,6 +376,8 @@ def draw_operator_help(control_view: np.ndarray, state: AppState, width: int, he
 
 def measurement_phase_text(state: AppState) -> str:
     if state.mode == AppMode.EXAM:
+        if state.exam_waiting_for_save:
+            return "Exam complete"
         if state.exam_recording:
             return "Exam recording: Trial {0}".format(state.exam_current_trial)
         if state.exam_total_trials > 0 and state.exam_current_trial > 0:
@@ -327,10 +385,8 @@ def measurement_phase_text(state: AppState) -> str:
         return "Select Exam mode to start"
     if state.mode == AppMode.PRACTICE:
         return "Practice mode active"
-    if state.mode != AppMode.MEASUREMENT:
-        if state.phase == MeasurementPhase.COMPLETE:
-            return "Measurement complete"
-        return "Select Measure mode to start"
+    if state.mode == AppMode.INITIAL:
+        return "Initial setup mode"
     if state.phase == MeasurementPhase.IDLE:
         return "Ready to mark START"
     if state.phase == MeasurementPhase.START_MARKED:
@@ -338,22 +394,24 @@ def measurement_phase_text(state: AppState) -> str:
     return "Measurement complete"
 
 
-def toolbar_button_active(action: str, state: AppState) -> bool:
-    if action == "measurement":
-        return state.mode == AppMode.MEASUREMENT
-    if action == "practice":
-        return state.mode == AppMode.PRACTICE
-    if action == "exam":
-        return state.mode == AppMode.EXAM
-    if action == "calibrate":
-        return state.calibrating
-    if action == "fullscreen":
-        return state.is_fullscreen
-    if action == "borderless":
-        return state.is_borderless
-    if action == "settings":
-        return state.camera_settings.panel_visible
-    return False
+def operator_hint_text(state: AppState) -> str:
+    if state.mode == AppMode.MEASUREMENT:
+        return "Subject action: press Space once."
+    if state.mode == AppMode.PRACTICE:
+        return "Subject action: follow the displayed path."
+    if state.mode == AppMode.EXAM:
+        return "Subject action: press Space to start or stop a trial."
+    return "Operator action: set calibration, scale, and subject folder."
+
+
+def exam_status_line(state: AppState) -> str:
+    if state.exam_waiting_for_save:
+        return "All trials complete, waiting for Save Exam"
+    if state.exam_recording:
+        return "Recording trial {0}/{1}".format(state.exam_current_trial, state.exam_total_trials)
+    if state.exam_total_trials > 0 and state.exam_current_trial > 0:
+        return "Ready for trial {0}/{1}".format(state.exam_current_trial, state.exam_total_trials)
+    return "No active exam session"
 
 
 def draw_filled_rect(image: np.ndarray, rect: Rect, color: tuple[int, int, int], alpha: float) -> None:

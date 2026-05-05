@@ -50,6 +50,11 @@ class ExamConfig:
     output_directory: Path = Path("data/exams")
 
 
+@dataclass(frozen=True)
+class SubjectConfig:
+    root_directory: Path = Path("data/subjects")
+
+
 @dataclass
 class TrackbarDefaults:
     exposure: int = 6
@@ -76,6 +81,7 @@ class AppConfig:
     settings: SettingsConfig = field(default_factory=SettingsConfig)
     paths: PathConfig = field(default_factory=PathConfig)
     exams: ExamConfig = field(default_factory=ExamConfig)
+    subjects: SubjectConfig = field(default_factory=SubjectConfig)
     trackbars: TrackbarDefaults = field(default_factory=TrackbarDefaults)
     default_scale_cm: float = 50.0
     csv_encoding: str = "utf-8-sig"

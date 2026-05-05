@@ -65,6 +65,9 @@ def smooth_path(points: list[Point], window_size: int) -> list[Point]:
     half_window = max(window_size // 2, 1)
     smoothed: list[Point] = []
     for index in range(len(points)):
+        if index == 0 or index == len(points) - 1:
+            smoothed.append(points[index])
+            continue
         start = max(0, index - half_window)
         end = min(len(points), index + half_window + 1)
         sample = points[start:end]
@@ -125,7 +128,9 @@ def process_measurement_path(
 ) -> list[Point]:
     filtered = filter_extreme_points(points, outlier_multiplier, minimum_jump_threshold)
     smoothed = smooth_path(filtered, smoothing_window)
-    return resample_path(smoothed, resample_points_count)
+    if len(smoothed) >= len(filtered):
+        return smoothed
+    return filtered
 
 
 def slice_path_by_percentage(

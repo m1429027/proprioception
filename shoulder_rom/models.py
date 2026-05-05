@@ -20,7 +20,7 @@ class MeasurementPhase(Enum):
 
 
 class AppMode(Enum):
-    IDLE = auto()
+    INITIAL = auto()
     MEASUREMENT = auto()
     PRACTICE = auto()
     EXAM = auto()
@@ -56,13 +56,16 @@ class CameraSettings:
 
 @dataclass
 class ControlPanelLayout:
-    toolbar_button_rects: Optional[dict[str, Rect]] = None
+    mode_tab_rects: Optional[dict[str, Rect]] = None
+    action_button_rects: Optional[dict[str, Rect]] = None
     decrease_rects: Optional[dict[str, Rect]] = None
     increase_rects: Optional[dict[str, Rect]] = None
 
     def __post_init__(self) -> None:
-        if self.toolbar_button_rects is None:
-            self.toolbar_button_rects = {}
+        if self.mode_tab_rects is None:
+            self.mode_tab_rects = {}
+        if self.action_button_rects is None:
+            self.action_button_rects = {}
         if self.decrease_rects is None:
             self.decrease_rects = {}
         if self.increase_rects is None:
@@ -186,16 +189,18 @@ class AppState:
     detection: DetectionResult
     raw_path_points: list[Point] = field(default_factory=list)
     filtered_path_points: list[Point] = field(default_factory=list)
-    practice_segment_start: int = 1
     practice_segment_end: int = 1
+    exam_segment_end: int = 1
     exam_total_trials: int = 0
     exam_current_trial: int = 0
     exam_recording: bool = False
+    exam_waiting_for_save: bool = False
     exam_trial_start_time: Optional[float] = None
     measurement_last_sample_time: Optional[float] = None
     exam_last_sample_time: Optional[float] = None
     exam_current_points: list[ExamPointRecord] = field(default_factory=list)
     exam_trials: list[ExamTrialRecord] = field(default_factory=list)
+    subject_directory: Optional[Path] = None
     last_exam_file: Optional[Path] = None
     last_path_file: Optional[Path] = None
     latest_message: str = ""

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 from time import perf_counter
 from typing import Optional
 
@@ -18,20 +17,18 @@ from .models import (
     ExamPointRecord,
     ExamTrialRecord,
     MeasurementPhase,
-    MeasurementRecord,
     PathCaptureRecord,
 )
 from .path_tools import process_measurement_path
 from .platform_win import toggle_borderless
-from .renderer import compute_measurement_metrics, render_control_view, render_projector_view
+from .renderer import render_control_view, render_projector_view
 from .storage import (
-    append_measurement_record,
     load_camera_settings,
     load_homography,
-    save_exam_trials_workbook,
-    save_path_capture,
     save_camera_settings,
+    save_exam_trials_workbook,
     save_homography,
+    save_path_capture,
 )
 from .ui_dialogs import DialogService
 from .vision import (
@@ -42,25 +39,6 @@ from .vision import (
     open_camera,
 )
 
-
-def nothing(_: int) -> None:
-    pass
-
-
-TOOLBAR_ACTION_MESSAGES = {
-    "measurement": ("Measurement mode enabled.", "Measurement mode disabled."),
-    "practice": ("Practice mode enabled.", "Practice mode disabled."),
-    "exam": ("Exam mode enabled.", "Exam mode disabled."),
-    "practice_range": ("Practice range updated.", None),
-    "calibrate": ("Calibration mode enabled.", "Calibration mode disabled."),
-    "reset": ("Start and end points cleared.", None),
-    "save_csv": ("Measurement saved.", None),
-    "scale": ("Scale updated.", None),
-    "segments": ("Split count updated.", None),
-    "fullscreen": ("Projector window fullscreen toggled.", None),
-    "borderless": ("Projector window borderless mode toggled.", None),
-    "settings": ("Camera settings opened.", "Camera settings hidden."),
-}
 
 SAMPLING_INTERVAL_EPSILON = 1e-6
 
@@ -79,7 +57,7 @@ class ShoulderMeasurementApp:
             self.config.trackbars,
         )
         self.state = AppState(
-            mode=AppMode.IDLE,
+            mode=AppMode.INITIAL,
             homography_matrix=homography_matrix,
             calibrating=False,
             is_fullscreen=False,
@@ -91,8 +69,8 @@ class ShoulderMeasurementApp:
             segment_count=3,
             camera_settings=camera_settings,
             detection=DetectionResult(),
-            practice_segment_start=1,
             practice_segment_end=3,
+            exam_segment_end=3,
             latest_message="{0} {1}".format(startup_message, settings_message).strip(),
             control_panel_layout=ControlPanelLayout(),
         )
@@ -118,9 +96,10 @@ class ShoulderMeasurementApp:
 
     def run(self) -> None:
         print("=== Shoulder Laser Projection Measurement System ===")
-        print("Space: mark start/end | Q: quit")
-        print("Toolbar: Measure | Practice | Exam | Range | Calibrate | Reset | Save CSV | Scale | Split | Full | Border | Settings")
-        print("Fallback shortcuts: C = calibrate, R = reset")
+        print("Mode tabs: Initial | Measure | Practice | Exam")
+        print("Measurement: Space = mark START / END")
+        print("Exam: Space = start / stop current trial")
+        print("Fallback keys: C = calibrate | Q = quit")
 
         try:
             while True:
@@ -179,9 +158,14 @@ class ShoulderMeasurementApp:
             return
 
         layout = self.state.control_panel_layout
-        for action, rect in layout.toolbar_button_rects.items():
+        for action, rect in layout.mode_tab_rects.items():
             if point_in_rect(x, y, rect):
-                self._handle_toolbar_action(action)
+                self._handle_mode_tab(action)
+                return
+
+        for action, rect in layout.action_button_rects.items():
+            if point_in_rect(x, y, rect):
+                self._handle_action_button(action)
                 return
 
         if not self.state.camera_settings.panel_visible:
@@ -207,35 +191,77 @@ class ShoulderMeasurementApp:
                 self._save_camera_settings()
                 return
 
-    def _handle_toolbar_action(self, action: str) -> None:
-        if action == "measurement":
-            self.toggle_measurement_mode()
+    def _handle_mode_tab(self, action: str) -> None:
+        target_mode = {
+            "initial": AppMode.INITIAL,
+            "measurement": AppMode.MEASUREMENT,
+            "practice": AppMode.PRACTICE,
+            "exam": AppMode.EXAM,
+        }.get(action)
+        if target_mode is None:
             return
-        if action == "practice":
-            self.toggle_practice_mode()
+
+        if self.state.exam_recording and target_mode != AppMode.EXAM:
+            self.state.latest_message = "Finish or reset the current exam trial before leaving Exam mode."
             return
-        if action == "exam":
-            self.toggle_exam_mode()
+        if (
+            self.state.mode == AppMode.MEASUREMENT
+            and self.state.phase == MeasurementPhase.START_MARKED
+            and target_mode != AppMode.MEASUREMENT
+        ):
+            self.state.latest_message = "Finish or reset the current path before leaving Measurement mode."
             return
-        if action == "practice_range":
-            self.update_practice_range()
+
+        if target_mode == AppMode.INITIAL:
+            self.state.mode = AppMode.INITIAL
+            self.state.latest_message = "Initial mode active."
             return
+
+        if self.state.subject_directory is None:
+            self.state.latest_message = "Please choose or create the subject folder before starting the next step."
+            self.dialogs.show_warning(
+                "Subject Folder",
+                "Please choose or create the subject folder in Initial mode before using Measurement, Practice, or Exam.",
+            )
+            return
+
+        if target_mode == AppMode.MEASUREMENT:
+            self.state.mode = AppMode.MEASUREMENT
+            if self.state.phase == MeasurementPhase.COMPLETE:
+                if self._path_saved_ready():
+                    self.state.latest_message = "Measurement mode active. Existing path is saved and ready."
+                else:
+                    self.state.latest_message = "Measurement mode active. Save Path before Practice or Exam."
+            else:
+                self.state.latest_message = "Measurement mode active. Press Space to mark START."
+            return
+
+        if target_mode == AppMode.PRACTICE:
+            if not self._path_saved_ready():
+                self.state.latest_message = "Save Path before entering Practice mode."
+                return
+            self.state.mode = AppMode.PRACTICE
+            self.state.latest_message = "Practice mode active."
+            return
+
+        self._activate_exam_mode()
+
+    def _handle_action_button(self, action: str) -> None:
         if action == "calibrate":
             self.state.calibrating = not self.state.calibrating
-            enabled_message, disabled_message = TOOLBAR_ACTION_MESSAGES[action]
-            self.state.latest_message = enabled_message if self.state.calibrating else disabled_message
+            self.state.latest_message = (
+                "Calibration mode enabled." if self.state.calibrating else "Calibration mode disabled."
+            )
             return
-        if action == "reset":
-            self.reset_measurement()
-            return
-        if action == "save_csv":
-            self.save_measurement()
+        if action == "settings":
+            self.state.camera_settings.panel_visible = not self.state.camera_settings.panel_visible
+            self.state.latest_message = (
+                "Camera settings opened." if self.state.camera_settings.panel_visible else "Camera settings hidden."
+            )
+            self._save_camera_settings()
             return
         if action == "scale":
             self.update_scale()
-            return
-        if action == "segments":
-            self.update_segment_count()
             return
         if action == "fullscreen":
             self.state.is_fullscreen = not self.state.is_fullscreen
@@ -244,17 +270,35 @@ class ShoulderMeasurementApp:
                 cv2.WND_PROP_FULLSCREEN,
                 cv2.WINDOW_FULLSCREEN if self.state.is_fullscreen else cv2.WINDOW_NORMAL,
             )
-            self.state.latest_message = TOOLBAR_ACTION_MESSAGES[action][0]
+            self.state.latest_message = "Projector fullscreen toggled."
             return
         if action == "borderless":
             self.state.is_borderless = toggle_borderless(PROJECTOR_WINDOW_NAME, self.state.is_borderless)
-            self.state.latest_message = TOOLBAR_ACTION_MESSAGES[action][0]
+            self.state.latest_message = "Projector borderless mode toggled."
             return
-        if action == "settings":
-            self.state.camera_settings.panel_visible = not self.state.camera_settings.panel_visible
-            enabled_message, disabled_message = TOOLBAR_ACTION_MESSAGES[action]
-            self.state.latest_message = enabled_message if self.state.camera_settings.panel_visible else disabled_message
-            self._save_camera_settings()
+        if action == "subject_folder":
+            self.choose_subject_directory()
+            return
+        if action == "reset_path":
+            self.reset_path()
+            return
+        if action == "split":
+            self.update_segment_count()
+            return
+        if action == "save_path":
+            self.save_path()
+            return
+        if action == "practice_range":
+            self.update_practice_range()
+            return
+        if action == "exam_range":
+            self.update_exam_range()
+            return
+        if action == "reset_trial":
+            self.reset_current_exam_trial()
+            return
+        if action == "save_exam":
+            self.save_exam()
             return
 
     def _update_calibration(self, gray_frame: np.ndarray) -> None:
@@ -279,16 +323,15 @@ class ShoulderMeasurementApp:
         if key == ord("q"):
             return False
         if key == ord("c"):
-            self._handle_toolbar_action("calibrate")
-            return True
-        if key == ord("r"):
-            self._handle_toolbar_action("reset")
+            self._handle_action_button("calibrate")
             return True
         if key == ord(" "):
             if self.state.mode == AppMode.EXAM:
                 self.handle_exam_action()
-            else:
+            elif self.state.mode == AppMode.MEASUREMENT:
                 self.mark_current_point()
+            else:
+                self.state.latest_message = "Space is only used in Measurement or Exam mode."
             return True
         return True
 
@@ -331,22 +374,19 @@ class ShoulderMeasurementApp:
             )
         )
 
-    def reset_measurement(self) -> None:
-        self.state.start_point = None
-        self.state.end_point = None
-        self.state.phase = MeasurementPhase.IDLE
-        self.state.mode = AppMode.IDLE
-        self.state.raw_path_points = []
-        self.state.filtered_path_points = []
-        self.state.last_path_file = None
-        self._reset_exam_state()
-        self.state.latest_message = "Start and end points cleared."
-
     def _sampling_due(self, last_sample_time: Optional[float], now: float) -> bool:
         if last_sample_time is None:
             return True
         interval = 1.0 / max(self.config.camera.target_fps, 1.0)
         return (now - last_sample_time) + SAMPLING_INTERVAL_EPSILON >= interval
+
+    def choose_subject_directory(self) -> None:
+        subject_dir = self.dialogs.choose_or_create_subject_directory(self.config.subjects.root_directory)
+        if subject_dir is None:
+            self.state.latest_message = "Subject folder selection canceled."
+            return
+        self.state.subject_directory = subject_dir
+        self.state.latest_message = "Subject folder set to {0}.".format(subject_dir.name)
 
     def update_scale(self) -> None:
         new_scale = self.dialogs.ask_scale_cm(self.state.scale_cm)
@@ -354,6 +394,8 @@ class ShoulderMeasurementApp:
             self.state.latest_message = "Scale update canceled."
             return
         self.state.scale_cm = new_scale
+        if self.state.measurement_ready:
+            self.state.last_path_file = None
         self.state.latest_message = (
             "Scale updated: "
             f"{self.config.screen.scale_bar_pixels}px = {self.state.scale_cm:.1f} cm."
@@ -365,8 +407,12 @@ class ShoulderMeasurementApp:
             self.state.latest_message = "Split count update canceled."
             return
         self.state.segment_count = new_count
-        self.state.practice_segment_start = 1
-        self.state.practice_segment_end = new_count
+        self.state.practice_segment_end = min(max(1, self.state.practice_segment_end), new_count)
+        self.state.exam_segment_end = min(max(1, self.state.exam_segment_end), new_count)
+        if self.state.measurement_ready:
+            self.state.last_path_file = None
+            self.state.latest_message = "Split count updated: {0} segment(s). Save Path again before Practice or Exam.".format(new_count)
+            return
         self.state.latest_message = "Split count updated: {0} segment(s).".format(new_count)
 
     def update_practice_range(self) -> None:
@@ -382,79 +428,85 @@ class ShoulderMeasurementApp:
             self.state.latest_message = "Practice range update canceled."
             return
 
-        self.state.practice_segment_start = 1
         self.state.practice_segment_end = selected
-        self.state.latest_message = "Practice range updated: START to segment {0}.".format(
-            self.state.practice_segment_end,
-        )
+        self.state.latest_message = "Practice range updated: START to segment {0}.".format(selected)
 
-    def toggle_measurement_mode(self) -> None:
-        if self.state.mode == AppMode.MEASUREMENT:
-            self.state.mode = AppMode.IDLE
-            if self.state.phase != MeasurementPhase.COMPLETE:
-                self.state.phase = MeasurementPhase.IDLE
-                self.state.start_point = None
-                self.state.end_point = None
-                self.state.raw_path_points = []
-            self.state.latest_message = TOOLBAR_ACTION_MESSAGES["measurement"][1]
-            return
-
-        self.state.mode = AppMode.MEASUREMENT
-        self._reset_exam_state()
-        self.state.phase = MeasurementPhase.IDLE
-        self.state.start_point = None
-        self.state.end_point = None
-        self.state.measurement_last_sample_time = None
-        self.state.raw_path_points = []
-        self.state.filtered_path_points = []
-        self.state.practice_segment_start = 1
-        self.state.practice_segment_end = self.state.segment_count
-        self.state.latest_message = TOOLBAR_ACTION_MESSAGES["measurement"][0]
-
-    def toggle_practice_mode(self) -> None:
-        if not self.state.filtered_path_points:
-            self.state.latest_message = "No measured path is available for practice."
-            return
-
-        if self.state.mode == AppMode.PRACTICE:
-            self.state.mode = AppMode.IDLE
-            self.state.latest_message = TOOLBAR_ACTION_MESSAGES["practice"][1]
-            return
-
-        self.state.mode = AppMode.PRACTICE
-        self._reset_exam_state()
-        self.state.latest_message = TOOLBAR_ACTION_MESSAGES["practice"][0]
-
-    def toggle_exam_mode(self) -> None:
-        if self.state.mode == AppMode.EXAM:
-            self.state.mode = AppMode.IDLE
-            self._reset_exam_state()
-            self.state.latest_message = TOOLBAR_ACTION_MESSAGES["exam"][1]
-            return
-
+    def update_exam_range(self) -> None:
         if not self.state.filtered_path_points:
             self.state.latest_message = "No measured path is available for exam."
             return
 
+        selected = self.dialogs.ask_exam_segment_end(
+            self.state.exam_segment_end,
+            self.state.segment_count,
+        )
+        if selected is None:
+            self.state.latest_message = "Exam range update canceled."
+            return
+
+        self.state.exam_segment_end = selected
+        self.state.latest_message = "Exam range updated: START to segment {0}.".format(selected)
+
+    def _activate_exam_mode(self) -> None:
+        if not self._path_saved_ready():
+            self.state.latest_message = "Save Path before entering Exam mode."
+            return
+
+        previous_mode = self.state.mode
+        self.state.mode = AppMode.EXAM
+        if self._exam_session_exists():
+            self.state.latest_message = self._exam_status_message()
+            return
+
         trial_count = self.dialogs.ask_exam_trial_count(3)
         if trial_count is None:
+            self.state.mode = previous_mode
             self.state.latest_message = "Exam mode canceled."
             return
 
-        self.state.mode = AppMode.EXAM
-        self.state.raw_path_points = []
-        self._reset_exam_state()
+        self._start_new_exam_session(trial_count)
+        self.state.latest_message = "Exam mode enabled. Trial 1 of {0} is ready.".format(trial_count)
+
+    def _start_new_exam_session(self, trial_count: int) -> None:
         self.state.exam_total_trials = trial_count
         self.state.exam_current_trial = 1
-        self.state.latest_message = "Exam mode enabled. Trial 1 of {0} is ready.".format(trial_count)
+        self.state.exam_recording = False
+        self.state.exam_waiting_for_save = False
+        self.state.exam_trial_start_time = None
+        self.state.exam_last_sample_time = None
+        self.state.exam_current_points = []
+        self.state.exam_trials = []
+        self.state.last_exam_file = None
+
+    def _exam_session_exists(self) -> bool:
+        return (
+            self.state.exam_total_trials > 0
+            or self.state.exam_current_trial > 0
+            or bool(self.state.exam_trials)
+            or self.state.exam_waiting_for_save
+        )
+
+    def _exam_status_message(self) -> str:
+        if self.state.exam_waiting_for_save:
+            return "Exam complete. Use Save Exam to export the Excel file."
+        if self.state.exam_recording:
+            return "Exam trial {0} is recording.".format(self.state.exam_current_trial)
+        if self.state.exam_current_trial > 0 and self.state.exam_total_trials > 0:
+            return "Exam mode active. Trial {0} of {1} is ready.".format(
+                self.state.exam_current_trial,
+                self.state.exam_total_trials,
+            )
+        return "Exam mode active."
 
     def handle_exam_action(self) -> None:
         if self.state.mode != AppMode.EXAM:
             self.state.latest_message = "Enable Exam mode before recording trials."
             return
-
-        if self.state.exam_total_trials <= 0 or self.state.exam_current_trial <= 0:
-            self.state.latest_message = "No exam session is active."
+        if not self._exam_session_exists():
+            self.state.latest_message = "Start an exam session before recording trials."
+            return
+        if self.state.exam_waiting_for_save:
+            self.state.latest_message = "All trials are complete. Use Save Exam to export the Excel file."
             return
 
         if not self.state.exam_recording:
@@ -478,10 +530,12 @@ class ShoulderMeasurementApp:
         self.state.exam_trials.append(trial_record)
         self.state.exam_recording = False
         self.state.exam_trial_start_time = None
+        self.state.exam_last_sample_time = None
         self.state.exam_current_points = []
 
         if self.state.exam_current_trial >= self.state.exam_total_trials:
-            self._finalize_exam_session()
+            self.state.exam_waiting_for_save = True
+            self.state.latest_message = "All exam trials are complete. Use Save Exam to export the Excel file."
             return
 
         completed_trial = self.state.exam_current_trial
@@ -490,6 +544,56 @@ class ShoulderMeasurementApp:
             completed_trial,
             self.state.exam_current_trial,
         )
+
+    def reset_current_exam_trial(self) -> None:
+        if self.state.mode != AppMode.EXAM and not self._exam_session_exists():
+            self.state.latest_message = "No exam session is active."
+            return
+        if self.state.exam_waiting_for_save:
+            if not self.state.exam_trials:
+                self.state.latest_message = "No completed exam trial is available to reset."
+                return
+            removed_trial = self.state.exam_trials.pop()
+            self.state.exam_waiting_for_save = False
+            self.state.exam_current_trial = removed_trial.trial_index
+            self.state.exam_recording = False
+            self.state.exam_trial_start_time = None
+            self.state.exam_last_sample_time = None
+            self.state.exam_current_points = []
+            self.state.latest_message = "Exam trial {0} reset. Ready to record again.".format(
+                removed_trial.trial_index,
+            )
+            return
+
+        if self.state.exam_recording:
+            self.state.exam_recording = False
+            self.state.exam_trial_start_time = None
+            self.state.exam_last_sample_time = None
+            self.state.exam_current_points = []
+            self.state.latest_message = "Current exam trial {0} reset.".format(self.state.exam_current_trial)
+            return
+
+        if self.state.exam_trials:
+            removed_trial = self.state.exam_trials.pop()
+            self.state.exam_current_trial = removed_trial.trial_index
+            self.state.exam_recording = False
+            self.state.exam_trial_start_time = None
+            self.state.exam_last_sample_time = None
+            self.state.exam_current_points = []
+            self.state.latest_message = "Exam trial {0} reset. Ready to record again.".format(
+                removed_trial.trial_index,
+            )
+            return
+
+        if self.state.exam_current_trial <= 0 or self.state.exam_total_trials <= 0:
+            self.state.latest_message = "No exam trial is ready to reset."
+            return
+
+        self.state.exam_recording = False
+        self.state.exam_trial_start_time = None
+        self.state.exam_last_sample_time = None
+        self.state.exam_current_points = []
+        self.state.latest_message = "Current exam trial {0} reset.".format(self.state.exam_current_trial)
 
     def mark_current_point(self) -> None:
         if self.state.mode != AppMode.MEASUREMENT:
@@ -508,7 +612,8 @@ class ShoulderMeasurementApp:
             self.state.measurement_last_sample_time = None
             self.state.raw_path_points = [point]
             self.state.filtered_path_points = []
-            self.state.latest_message = f"Start point marked: {point}."
+            self.state.last_path_file = None
+            self.state.latest_message = "Start point marked: {0}.".format(point)
             return
 
         if self.state.phase == MeasurementPhase.START_MARKED:
@@ -518,40 +623,20 @@ class ShoulderMeasurementApp:
             self.state.latest_message = "Processing measured path..."
             self._finalize_measurement_path()
             self.state.phase = MeasurementPhase.COMPLETE
-            self.state.mode = AppMode.IDLE
-            self.state.latest_message = f"End point marked: {point}. Path processed and ready for practice."
+            self.state.latest_message = "End point marked: {0}. Path processed. Save Path before Practice or Exam.".format(point)
             return
 
-        self.state.latest_message = "Measurement is already complete. Press R to reset."
+        self.state.latest_message = "Measurement is already complete. Use Reset Path to start again."
 
-    def _finalize_exam_session(self) -> None:
-        default_path = self.config.exams.output_directory / "exam_trials_{0}.xlsx".format(
-            datetime.now().strftime("%Y%m%d_%H%M%S")
-        )
-        chosen_path = self.dialogs.choose_exam_xlsx_path(self.config.exams.output_directory)
-        save_path = chosen_path if chosen_path is not None else default_path
-        self.state.last_exam_file = save_exam_trials_workbook(save_path, self.state.exam_trials)
-        trial_count = self.state.exam_total_trials
-        self.state.mode = AppMode.IDLE
-        self.state.exam_recording = False
-        self.state.exam_trial_start_time = None
-        self.state.exam_current_points = []
-        self.state.exam_current_trial = trial_count
-        self.state.latest_message = "Exam complete. Saved {0} trial(s) to {1}.".format(
-            trial_count,
-            self.state.last_exam_file.name,
-        )
-
-    def _reset_exam_state(self) -> None:
-        self.state.exam_total_trials = 0
-        self.state.exam_current_trial = 0
-        self.state.exam_recording = False
-        self.state.exam_trial_start_time = None
+    def reset_path(self) -> None:
+        self.state.start_point = None
+        self.state.end_point = None
+        self.state.phase = MeasurementPhase.IDLE
+        self.state.raw_path_points = []
+        self.state.filtered_path_points = []
         self.state.measurement_last_sample_time = None
-        self.state.exam_last_sample_time = None
-        self.state.exam_current_points = []
-        self.state.exam_trials = []
-        self.state.last_exam_file = None
+        self.state.last_path_file = None
+        self.state.latest_message = "Measurement path reset."
 
     def _finalize_measurement_path(self) -> None:
         if len(self.state.raw_path_points) < 2:
@@ -570,59 +655,59 @@ class ShoulderMeasurementApp:
             self.state.filtered_path_points[0] = self.state.start_point
         if self.state.end_point is not None and self.state.filtered_path_points:
             self.state.filtered_path_points[-1] = self.state.end_point
-        self.state.practice_segment_start = 1
-        self.state.practice_segment_end = self.state.segment_count
+        self.state.practice_segment_end = min(self.state.segment_count, max(1, self.state.practice_segment_end))
+        self.state.exam_segment_end = min(self.state.segment_count, max(1, self.state.exam_segment_end))
+        self.state.last_path_file = None
 
+    def save_path(self) -> None:
+        if self.state.subject_directory is None:
+            self.state.latest_message = "Please set the subject folder before saving the path."
+            self.dialogs.show_warning("Subject Folder", "Please choose or create a subject folder first.")
+            return
+        if not self.state.measurement_ready or not self.state.filtered_path_points:
+            self.state.latest_message = "No completed measurement path is available to save."
+            return
+
+        timestamp = datetime.now()
+        path = self.state.subject_directory / "{0}_path.json".format(timestamp.strftime("%Y%m%d_%H%M%S"))
         record = PathCaptureRecord(
-            timestamp=datetime.now(),
+            timestamp=timestamp,
             raw_points=self.state.raw_path_points[:],
             filtered_points=self.state.filtered_path_points[:],
             segment_count=self.state.segment_count,
             scale_cm=self.state.scale_cm,
             scale_pixels=self.config.screen.scale_bar_pixels,
         )
-        self.state.last_path_file = save_path_capture(self.config.paths.capture_directory, record)
+        self.state.last_path_file = save_path_capture(path, record)
+        self.state.latest_message = "Path saved to {0}.".format(self.state.last_path_file.name)
 
-    def save_measurement(self) -> None:
-        if not self.state.measurement_ready:
-            self.dialogs.show_warning("Measurement incomplete", "Mark both the start point and the end point before saving.")
-            self.state.latest_message = "Measurement is incomplete. Save canceled."
+    def _path_saved_ready(self) -> bool:
+        return bool(self.state.filtered_path_points) and self.state.last_path_file is not None
+
+    def save_exam(self) -> None:
+        if self.state.subject_directory is None:
+            self.state.latest_message = "Please set the subject folder before saving the exam."
+            self.dialogs.show_warning("Subject Folder", "Please choose or create a subject folder first.")
+            return
+        if not self.state.exam_waiting_for_save or not self.state.exam_trials:
+            self.state.latest_message = "Complete the full exam session before saving the Excel file."
             return
 
-        if self.state.csv_path is None:
-            chosen = self.dialogs.choose_csv_path(Path.cwd())
-            if chosen is None:
-                self.state.latest_message = "CSV save canceled."
-                return
-            self.state.csv_path = chosen
+        timestamp = datetime.now()
+        save_path = self.state.subject_directory / "{0}_data.xlsx".format(timestamp.strftime("%Y%m%d_%H%M%S"))
+        self.state.last_exam_file = save_exam_trials_workbook(save_path, self.state.exam_trials)
+        self.state.latest_message = "Exam saved to {0}.".format(self.state.last_exam_file.name)
+        self._clear_exam_session()
 
-        metrics = compute_measurement_metrics(
-            self.state.start_point,
-            self.state.end_point,
-            self.state.scale_cm,
-            self.config.screen.scale_bar_pixels,
-        )
-        record = MeasurementRecord(
-            timestamp=datetime.now(),
-            start_x=self.state.start_point[0],
-            start_y=self.state.start_point[1],
-            end_x=self.state.end_point[0],
-            end_y=self.state.end_point[1],
-            total_cm=metrics.total_cm,
-            one_third_cm=metrics.one_third_cm,
-            two_third_cm=metrics.two_third_cm,
-            scale_cm=self.state.scale_cm,
-            scale_pixels=self.config.screen.scale_bar_pixels,
-            calibration_file=self.config.calibration.calibration_path.name,
-        )
-        append_measurement_record(self.state.csv_path, record, self.config.csv_encoding)
-        if self.state.last_path_file is not None:
-            self.state.latest_message = "Measurement saved to {0}. Path saved to {1}.".format(
-                self.state.csv_path.name,
-                self.state.last_path_file.name,
-            )
-            return
-        self.state.latest_message = f"Measurement saved to {self.state.csv_path.name}."
+    def _clear_exam_session(self) -> None:
+        self.state.exam_total_trials = 0
+        self.state.exam_current_trial = 0
+        self.state.exam_recording = False
+        self.state.exam_waiting_for_save = False
+        self.state.exam_trial_start_time = None
+        self.state.exam_last_sample_time = None
+        self.state.exam_current_points = []
+        self.state.exam_trials = []
 
 
 def main() -> None:

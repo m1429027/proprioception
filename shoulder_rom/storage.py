@@ -12,8 +12,7 @@ import numpy as np
 
 from .camera_panel import camera_settings_from_dict, camera_settings_to_dict, create_default_camera_settings
 from .config import TrackbarDefaults
-from .models import CameraSettings
-from .models import ExamTrialRecord, MeasurementRecord, PathCaptureRecord
+from .models import CameraSettings, ExamTrialRecord, MeasurementRecord, PathCaptureRecord
 
 
 def load_homography(path: Path) -> Tuple[Optional[np.ndarray], str]:
@@ -48,10 +47,8 @@ def append_measurement_record(path: Path, record: MeasurementRecord, encoding: s
         writer.writerow(record.csv_row())
 
 
-def save_path_capture(directory: Path, record: PathCaptureRecord) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    filename = "path_capture_{0}.json".format(record.timestamp.strftime("%Y%m%d_%H%M%S_%f"))
-    path = directory / filename
+def save_path_capture(path: Path, record: PathCaptureRecord) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(record.to_dict(), ensure_ascii=False, indent=2),
         encoding="utf-8",
