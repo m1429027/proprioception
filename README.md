@@ -2,122 +2,213 @@
 
 ## 專案簡介
 
-這個專案是用來做肩關節活動範圍量測與練習的半自動化系統。
+這個專案是用來做肩關節活動範圍量測、練習與考試的半自動化系統。
 
-系統會用相機偵測紅色雷射點，並把對應位置投影到螢幕上；完成校正後，可以進行起點、終點、距離與路徑的量測，並把量測後的路徑拿來做練習引導。
+系統會用相機偵測紅色雷射點，並把對應位置投影到螢幕上。完成 `ArUco`（校正用標記）校正後，可以量測 `START` 到 `END` 的移動路徑，將路徑分段做練習，並在考試模式中記錄多個 `trial`（回合）後輸出成 `Excel`（試算表）檔。
 
-## 主要功能
+## 目前主要功能
 
 - 紅色雷射點偵測
-- `ArUco`（校正用標記）校正
-- `Measurement`（量測模式）：記錄 `START` 到 `END` 的路徑
-- `Practice`（練習模式）：顯示最新一次量測完成的路徑
+- `ArUco` 校正
+- 四模式操作介面：
+  - `Initial`
+  - `Measure`
+  - `Practice`
+  - `Exam`
+- `Measure`：記錄 `START` 到 `END` 的紅點路徑
+- `Practice`：依照儲存後的路徑做分段顯示與練習
+- `Exam`：設定多個 `trial`，逐回合記錄 `x / y / time`
 - `Split`（分段數）：設定整條路徑切成幾段
-- `Range`（區段範圍）：設定練習時從 `START` 顯示到第幾個分點
-- `CSV`（逗號分隔檔）量測摘要輸出
-- `JSON`（結構化資料檔）路徑資料輸出
+- `Range`（區段範圍）：設定從 `START` 顯示到第幾個分點
+- `Path JSON`（路徑資料檔）輸出
+- `Exam Excel`（考試試算表）輸出
 
-## 畫面說明
+## 畫面分工
 
 ### `Control Panel`（控制面板）
 
 主要給操作者使用，顯示：
+
 - 相機畫面
-- 工具列按鈕
+- 四模式分頁
+- 當前模式按鈕
 - 狀態訊息
 - 相機設定面板
-- 分段數與練習區段
+- 受試者資料夾狀態
 
 ### `Projector Screen`（投影畫面）
 
 主要給受試者使用，顯示：
+
 - 比例尺
 - 十字準星
 - `START` / `END`
 - 量測路徑
 - 分段百分比
 - `MAX ROM`
-- 練習模式高亮路徑
+- `Practice` 或 `Exam` 的參考路徑高亮區段
+
+## 四模式說明
+
+### `Initial`
+
+用來做量測前準備：
+
+- `Calibrate`
+- `Settings`
+- `Scale`
+- `Full`
+- `Border`
+- `Subject`
+
+這個模式要先完成受試者資料夾設定，後面才能進 `Measure`、`Practice`、`Exam`。
+
+### `Measure`
+
+用來建立正式路徑：
+
+- `Reset Path`
+- `Split`
+- `Save Path`
+
+操作方式：
+
+1. 按 `Space` 標記 `START`
+2. 紅點移動過程會持續記錄路徑
+3. 再按一次 `Space` 標記 `END`
+4. 系統會整理路徑
+5. 按 `Save Path` 後，才能進 `Practice` 或 `Exam`
+
+### `Practice`
+
+用來依照剛儲存的路徑做練習：
+
+- `Range`
+
+操作方式：
+
+1. 先完成 `Measure`
+2. 先 `Save Path`
+3. 進入 `Practice`
+4. 如只要顯示部分路徑，按 `Range`
+5. 輸入要顯示到第幾個分點
+
+### `Exam`
+
+用來做考試回合記錄：
+
+- `Range`
+- `Reset Trial`
+- `Save Exam`
+
+操作方式：
+
+1. 先完成 `Measure`
+2. 先 `Save Path`
+3. 進入 `Exam`
+4. 設定要做幾個 `trial`
+5. 每個 `trial` 按一次 `Space` 開始，再按一次 `Space` 結束
+6. 全部完成後，按 `Save Exam` 輸出 `Excel`
 
 ## SOP
 
 ### 量測前
 
 1. 開啟相機與投影機。
-2. 確認投影幕有進入相機畫面。
-3. 確認紅色雷射點能穩定顯示。
-4. 必要時用 `Settings`（設定）調整相機參數。
+2. 確認投影畫面有進入相機視野。
+3. 確認紅色雷射點可穩定顯示。
+4. 進入 `Initial` 模式。
+5. 設定 `Subject`（受試者資料夾）。
+6. 必要時開啟 `Settings` 調整相機參數。
 
 ### 校正
 
-1. 按下 `Calibrate`。
+1. 在 `Initial` 模式按下 `Calibrate`。
 2. 確認相機看得到 4 個 `ArUco`。
-3. 校正完成後再開始量測。
+3. 校正完成後再進行量測。
 
 ### 量測
 
-1. 按下 `Split` 設定分段數，預設為 `3`。
-2. 按下 `Measure` 進入量測模式。
+1. 進入 `Measure`。
+2. 按 `Split` 設定分段數。
 3. 按一次 `Space` 標記 `START`。
-4. 系統開始記錄紅點路徑。
+4. 移動紅點到終點。
 5. 再按一次 `Space` 標記 `END`。
-6. 系統自動整理路徑。
-7. 需要保存結果時按 `Save CSV`。
+6. 系統整理路徑。
+7. 按 `Save Path` 儲存路徑。
 
 ### 練習
 
-1. 完成一次量測後，按下 `Practice`。
-2. 投影畫面會顯示整理過的路徑。
-3. 如只要練部分路徑，按下 `Range`。
-4. 輸入要顯示到第幾個分點，例如到第 `2` 個分點。
+1. 進入 `Practice`。
+2. 投影畫面會顯示參考路徑。
+3. 如只要顯示部分路徑，按 `Range`。
+4. 輸入從 `START` 到第幾個分點。
 
-### 重設
+### 考試
 
-1. 按下 `Reset`。
-2. 清除本次量測與暫存路徑資料。
+1. 進入 `Exam`。
+2. 設定 `trial` 數量。
+3. 每回合按一次 `Space` 開始記錄。
+4. 再按一次 `Space` 結束該回合。
+5. 若上一個回合做不好，可按 `Reset Trial` 重做上一個已完成回合。
+6. 全部完成後按 `Save Exam`。
 
-## 工具列按鈕
+## 操作限制
 
-- `Measure`：進入量測模式
-- `Practice`：顯示最新練習路徑
-- `Range`：設定從 `START` 到第幾個分點
-- `Calibrate`：校正
-- `Reset`：重設
-- `Save CSV`：輸出量測摘要
-- `Scale`：設定比例尺實際長度
-- `Split`：設定總分段數
-- `Full`：切換全螢幕
-- `Border`：切換無邊框
-- `Settings`：開啟相機設定面板
+- 未先設定 `Subject Folder`，不能進入 `Measure`、`Practice`、`Exam`
+- 未先 `Save Path`，不能進入 `Practice`、`Exam`
+- 若量測完成後又修改 `Split` 或 `Scale`，需要重新 `Save Path`
+- `Exam` 不會在最後一個 `trial` 自動存檔，必須手動按 `Save Exam`
 
 ## 快捷鍵
 
-- `Space`：標記 `START` / `END`
+- `Space`
+  - `Measure`：標記 `START / END`
+  - `Exam`：開始 / 結束目前 `trial`
 - `C`：校正
-- `R`：重設
 - `Q`：離開程式
+
+## 路徑邏輯
+
+目前量測路徑的處理方式是：
+
+1. 在 `START` 到 `END` 之間持續記錄紅點座標
+2. 去除連續重複點
+3. 排除極端跳點
+4. 對中間路徑做較保守的平滑
+5. 保留原始 `START` 與 `END`
+
+目標是讓路徑盡量貼近受試者實際移動軌跡，而不是用捷徑簡化成一條過度平順的線。
 
 ## 輸出資料
 
-### `CSV`
+所有正式輸出都存到同一位受試者資料夾中。
 
-儲存量測摘要，例如：
-- 日期時間
-- 起點與終點座標
-- 總距離
-- 分段距離
-- 比例尺資訊
+### `Path JSON`
 
-### `JSON`
+檔名格式：
 
-儲存路徑資料，例如：
+- `YYYYMMDD_HHMMSS_path.json`
+
+內容包含：
+
 - 原始路徑點
 - 處理後路徑點
 - 分段數
 - 比例尺資訊
 
-預設存放位置：
-- [data/paths](C:\Position\data\paths)
+### `Exam Excel`
+
+檔名格式：
+
+- `YYYYMMDD_HHMMSS_data.xlsx`
+
+內容包含：
+
+- 每個 `trial` 的 `x`
+- 每個 `trial` 的 `y`
+- 每個 `trial` 的 `time`
+- 每個 `trial` 的 `total time`
 
 ## 主要檔案功能
 
@@ -127,7 +218,7 @@
 - [shoulder_rom/app.py](C:\Position\shoulder_rom\app.py)
   - 主流程控制
   - 模式切換
-  - 按鈕與快捷鍵行為
+  - 路徑與考試流程
 
 - [shoulder_rom/vision.py](C:\Position\shoulder_rom\vision.py)
   - 雷射點偵測
@@ -137,15 +228,17 @@
   - `Control Panel` 與 `Projector Screen` 畫面繪製
 
 - [shoulder_rom/path_tools.py](C:\Position\shoulder_rom\path_tools.py)
-  - 路徑清理
+  - 路徑去重
+  - 跳點過濾
   - 平滑化
   - 百分比分段切割
 
 - [shoulder_rom/storage.py](C:\Position\shoulder_rom\storage.py)
-  - `CSV`、`JSON`、校正檔與設定檔讀寫
+  - `Path JSON`、`Exam Excel`、校正檔與設定檔讀寫
 
 - [shoulder_rom/ui_dialogs.py](C:\Position\shoulder_rom\ui_dialogs.py)
-  - 輸入視窗與存檔視窗
+  - 輸入視窗
+  - 受試者資料夾選取 / 建立
 
 - [shoulder_rom/config.py](C:\Position\shoulder_rom\config.py)
   - 系統預設參數與路徑設定
@@ -184,12 +277,19 @@ python Demo.py
 - 確認 4 個 `ArUco` 都在畫面內
 - 重新按一次 `Calibrate`
 
-### 練習模式沒有路徑
+### 不能進 `Practice` 或 `Exam`
 
-- 先完成一次 `Measure`
-- 確認有成功標記 `START` 與 `END`
+- 先確認是否已設定 `Subject Folder`
+- 先確認是否已完成量測
+- 先確認是否已按 `Save Path`
 
-### 路徑太抖
+### 路徑看起來不對
 
-- 先改善紅點偵測穩定度
-- 再重新量測一次
+- 先確認紅點偵測是否穩定
+- 重新做一次量測
+- 若量測後修改過 `Split` 或 `Scale`，要重新 `Save Path`
+
+### `Exam` 無法存檔
+
+- 確認所有 `trial` 都已完成
+- 確認最後有按 `Save Exam`
