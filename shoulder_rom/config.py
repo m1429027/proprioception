@@ -13,7 +13,6 @@ class CameraConfig:
     camera_id: int = 0
     frame_width: int = 1280
     frame_height: int = 720
-    target_fps: float = 30.0
     disable_autofocus: bool = True
 
 
@@ -42,7 +41,6 @@ class PathConfig:
     smoothing_window: int = 5
     outlier_multiplier: float = 3.5
     minimum_jump_threshold: float = 12.0
-    resample_points: int = 120
 
 
 @dataclass(frozen=True)

@@ -26,6 +26,14 @@ class AppMode(Enum):
     EXAM = auto()
 
 
+class ExamTrialPhase(Enum):
+    IDLE = auto()
+    READY_TO_START = auto()
+    RECORDING_TO_TARGET = auto()
+    RECORDING_TO_END = auto()
+    WAITING_TO_SAVE = auto()
+
+
 @dataclass
 class TrackbarValues:
     exposure: int
@@ -93,6 +101,21 @@ class ExamTrialRecord:
     trial_index: int
     points: list[ExamPointRecord] = field(default_factory=list)
     total_time_s: float = 0.0
+    start_point: Optional[Point] = None
+    start_time_s: Optional[float] = None
+    target_point: Optional[Point] = None
+    target_time_s: Optional[float] = None
+    end_point: Optional[Point] = None
+    end_time_s: Optional[float] = None
+    start_error_cm: Optional[float] = None
+    target_error_cm: Optional[float] = None
+    end_error_cm: Optional[float] = None
+
+
+@dataclass
+class ExamSegmentRecord:
+    segment_end: int
+    trials: list[ExamTrialRecord] = field(default_factory=list)
 
 
 @dataclass
@@ -191,15 +214,25 @@ class AppState:
     filtered_path_points: list[Point] = field(default_factory=list)
     practice_segment_end: int = 1
     exam_segment_end: int = 1
+    exam_range_confirmed: bool = False
     exam_total_trials: int = 0
+    exam_active_segment_end: Optional[int] = None
     exam_current_trial: int = 0
     exam_recording: bool = False
     exam_waiting_for_save: bool = False
+    exam_phase: ExamTrialPhase = ExamTrialPhase.IDLE
     exam_trial_start_time: Optional[float] = None
-    measurement_last_sample_time: Optional[float] = None
-    exam_last_sample_time: Optional[float] = None
     exam_current_points: list[ExamPointRecord] = field(default_factory=list)
+    exam_current_start_point: Optional[Point] = None
+    exam_current_target_point: Optional[Point] = None
+    exam_current_end_point: Optional[Point] = None
+    exam_segments: list[ExamSegmentRecord] = field(default_factory=list)
     exam_trials: list[ExamTrialRecord] = field(default_factory=list)
+    latest_exam_error_segment: Optional[int] = None
+    latest_exam_error_trial: Optional[int] = None
+    latest_exam_start_error_cm: Optional[float] = None
+    latest_exam_target_error_cm: Optional[float] = None
+    latest_exam_end_error_cm: Optional[float] = None
     subject_directory: Optional[Path] = None
     last_exam_file: Optional[Path] = None
     last_path_file: Optional[Path] = None

@@ -18,6 +18,7 @@
 - `Measure`：記錄 `START` 到 `END` 的紅點路徑
 - `Practice`：依照儲存後的路徑做分段顯示與練習
 - `Exam`：設定多個 `trial`，逐回合記錄 `x / y / time`
+- `Exam`：支援多個 `segment`，每個 `segment` 以相同 `trial` 數進行考試
 - `Split`（分段數）：設定整條路徑切成幾段
 - `Range`（區段範圍）：設定從 `START` 顯示到第幾個分點
 - `Path JSON`（路徑資料檔）輸出
@@ -35,6 +36,7 @@
 - 狀態訊息
 - 相機設定面板
 - 受試者資料夾狀態
+- 最新一筆 `Exam` 誤差資訊
 
 ### `Projector Screen`（投影畫面）
 
@@ -107,8 +109,13 @@
 2. 先 `Save Path`
 3. 進入 `Exam`
 4. 設定要做幾個 `trial`
-5. 每個 `trial` 按一次 `Space` 開始，再按一次 `Space` 結束
-6. 全部完成後，按 `Save Exam` 輸出 `Excel`
+5. 先按 `Range` 選擇這次考到第幾個分點
+6. 每個 `trial` 依序按三次 `Space`
+   - 第一次：標記 `start`
+   - 第二次：標記 `target`
+   - 第三次：標記 `end`
+7. 做完一個 `segment` 的全部 `trial` 後，可再選下一個 `Range`
+8. 全部 `segment` 完成後，按 `Save Exam` 一次輸出 `Excel`
 
 ## SOP
 
@@ -148,10 +155,15 @@
 
 1. 進入 `Exam`。
 2. 設定 `trial` 數量。
-3. 每回合按一次 `Space` 開始記錄。
-4. 再按一次 `Space` 結束該回合。
-5. 若上一個回合做不好，可按 `Reset Trial` 重做上一個已完成回合。
-6. 全部完成後按 `Save Exam`。
+3. 按 `Range` 選擇這次要考到第幾個分點。
+4. 每回合按三次 `Space`：
+   - 第一次標記 `start`
+   - 第二次標記 `target`
+   - 第三次標記 `end`
+5. 每個 `trial` 完成後，`Control Panel` 會顯示該回合的 `start error / target error / end error`。
+6. 若上一個回合做不好，可按 `Reset Trial` 重做上一個已完成回合。
+7. 做完一個 `segment` 後，可選下一個 `Range` 繼續記錄。
+8. 全部完成後按 `Save Exam`。
 
 ## 操作限制
 
@@ -159,12 +171,13 @@
 - 未先 `Save Path`，不能進入 `Practice`、`Exam`
 - 若量測完成後又修改 `Split` 或 `Scale`，需要重新 `Save Path`
 - `Exam` 不會在最後一個 `trial` 自動存檔，必須手動按 `Save Exam`
+- `Exam` 必須先設定 `Range` 才能開始當前 `segment`
 
 ## 快捷鍵
 
 - `Space`
   - `Measure`：標記 `START / END`
-  - `Exam`：開始 / 結束目前 `trial`
+  - `Exam`：依序標記 `start / target / end`
 - `C`：校正
 - `Q`：離開程式
 
@@ -205,10 +218,12 @@
 
 內容包含：
 
-- 每個 `trial` 的 `x`
-- 每個 `trial` 的 `y`
-- 每個 `trial` 的 `time`
+- 每個 `segment` 一個獨立 `sheet`
+- 每個 `trial` 的 `x / y / time / event`
+- 每個 `trial` 的 `start point / target point / end point`
+- 每個 `trial` 的 `start error / target error / end error`（`cm`）
 - 每個 `trial` 的 `total time`
+- 最後一個 `Path` `sheet`，列出本次量測的參考路徑 `x / y`
 
 ## 主要檔案功能
 
@@ -292,4 +307,5 @@ python Demo.py
 ### `Exam` 無法存檔
 
 - 確認所有 `trial` 都已完成
+- 確認目前 `segment` 已完成，沒有停在中途
 - 確認最後有按 `Save Exam`

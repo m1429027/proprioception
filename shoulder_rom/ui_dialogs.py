@@ -129,5 +129,8 @@ class DialogService:
     def show_warning(self, title: str, message: str) -> None:
         messagebox.showwarning(title, message, parent=self.root)
 
+    def show_info(self, title: str, message: str) -> None:
+        messagebox.showinfo(title, message, parent=self.root)
+
     def destroy(self) -> None:
         self.root.destroy()

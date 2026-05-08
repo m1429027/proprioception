@@ -14,12 +14,14 @@ from .models import (
     AppState,
     ControlPanelLayout,
     DetectionResult,
+    ExamSegmentRecord,
+    ExamTrialPhase,
     ExamPointRecord,
     ExamTrialRecord,
     MeasurementPhase,
     PathCaptureRecord,
 )
-from .path_tools import process_measurement_path
+from .path_tools import point_distance, process_measurement_path, sample_point_at_fraction
 from .platform_win import toggle_borderless
 from .renderer import render_control_view, render_projector_view
 from .storage import (
@@ -38,9 +40,6 @@ from .vision import (
     detect_laser,
     open_camera,
 )
-
-
-SAMPLING_INTERVAL_EPSILON = 1e-6
 
 
 class ShoulderMeasurementApp:
@@ -83,7 +82,6 @@ class ShoulderMeasurementApp:
     def _configure_camera(self) -> None:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.camera.frame_width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.camera.frame_height)
-        self.cap.set(cv2.CAP_PROP_FPS, self.config.camera.target_fps)
         if self.config.camera.disable_autofocus:
             self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
 
@@ -98,7 +96,7 @@ class ShoulderMeasurementApp:
         print("=== Shoulder Laser Projection Measurement System ===")
         print("Mode tabs: Initial | Measure | Practice | Exam")
         print("Measurement: Space = mark START / END")
-        print("Exam: Space = start / stop current trial")
+        print("Exam: Space = mark START / TARGET / END")
         print("Fallback keys: C = calibrate | Q = quit")
 
         try:
@@ -203,6 +201,14 @@ class ShoulderMeasurementApp:
 
         if self.state.exam_recording and target_mode != AppMode.EXAM:
             self.state.latest_message = "Finish or reset the current exam trial before leaving Exam mode."
+            return
+        if (
+            self.state.mode == AppMode.EXAM
+            and target_mode != AppMode.EXAM
+            and self.state.exam_active_segment_end is not None
+            and self.state.exam_current_trial > 0
+        ):
+            self.state.latest_message = "Finish the current exam segment or reset the trial before leaving Exam mode."
             return
         if (
             self.state.mode == AppMode.MEASUREMENT
@@ -344,10 +350,6 @@ class ShoulderMeasurementApp:
         point = self.state.detection.screen_point
         if point is None:
             return
-        now = perf_counter()
-        if not self._sampling_due(self.state.measurement_last_sample_time, now):
-            return
-        self.state.measurement_last_sample_time = now
         if not self.state.raw_path_points or self.state.raw_path_points[-1] != point:
             self.state.raw_path_points.append(point)
 
@@ -362,10 +364,12 @@ class ShoulderMeasurementApp:
             return
 
         now = perf_counter()
-        if not self._sampling_due(self.state.exam_last_sample_time, now):
+        self._append_exam_point(point, now)
+
+    def _append_exam_point(self, point: tuple[int, int], perf_time: float) -> None:
+        if self.state.exam_trial_start_time is None:
             return
-        self.state.exam_last_sample_time = now
-        elapsed = now - self.state.exam_trial_start_time
+        elapsed = max(0.0, perf_time - self.state.exam_trial_start_time)
         self.state.exam_current_points.append(
             ExamPointRecord(
                 x=point[0],
@@ -373,12 +377,6 @@ class ShoulderMeasurementApp:
                 time_s=elapsed,
             )
         )
-
-    def _sampling_due(self, last_sample_time: Optional[float], now: float) -> bool:
-        if last_sample_time is None:
-            return True
-        interval = 1.0 / max(self.config.camera.target_fps, 1.0)
-        return (now - last_sample_time) + SAMPLING_INTERVAL_EPSILON >= interval
 
     def choose_subject_directory(self) -> None:
         subject_dir = self.dialogs.choose_or_create_subject_directory(self.config.subjects.root_directory)
@@ -409,6 +407,10 @@ class ShoulderMeasurementApp:
         self.state.segment_count = new_count
         self.state.practice_segment_end = min(max(1, self.state.practice_segment_end), new_count)
         self.state.exam_segment_end = min(max(1, self.state.exam_segment_end), new_count)
+        self.state.exam_range_confirmed = False
+        self.state.exam_active_segment_end = None
+        if self._exam_session_exists():
+            self._clear_exam_session()
         if self.state.measurement_ready:
             self.state.last_path_file = None
             self.state.latest_message = "Split count updated: {0} segment(s). Save Path again before Practice or Exam.".format(new_count)
@@ -435,6 +437,19 @@ class ShoulderMeasurementApp:
         if not self.state.filtered_path_points:
             self.state.latest_message = "No measured path is available for exam."
             return
+        if not self._exam_session_exists():
+            self.state.latest_message = "Start an exam session before choosing the exam range."
+            return
+        if self.state.exam_recording:
+            self.state.latest_message = "Finish or reset the current trial before changing the exam range."
+            return
+        if (
+            self.state.exam_active_segment_end is not None
+            and self.state.exam_current_trial > 0
+            and self.state.exam_current_trial <= self.state.exam_total_trials
+        ):
+            self.state.latest_message = "Finish the current segment or reset the trial before changing the exam range."
+            return
 
         selected = self.dialogs.ask_exam_segment_end(
             self.state.exam_segment_end,
@@ -444,7 +459,17 @@ class ShoulderMeasurementApp:
             self.state.latest_message = "Exam range update canceled."
             return
 
+        if self._find_exam_segment(selected) is not None:
+            self.state.latest_message = "Segment {0} is already recorded in this exam session.".format(selected)
+            return
+
         self.state.exam_segment_end = selected
+        self.state.exam_range_confirmed = True
+        self.state.exam_active_segment_end = selected
+        self.state.exam_current_trial = 1
+        self.state.exam_phase = ExamTrialPhase.READY_TO_START
+        self._ensure_exam_segment(selected)
+        self.state.exam_waiting_for_save = False
         self.state.latest_message = "Exam range updated: START to segment {0}.".format(selected)
 
     def _activate_exam_mode(self) -> None:
@@ -465,16 +490,22 @@ class ShoulderMeasurementApp:
             return
 
         self._start_new_exam_session(trial_count)
-        self.state.latest_message = "Exam mode enabled. Trial 1 of {0} is ready.".format(trial_count)
+        self.state.latest_message = "Exam mode enabled. Choose the exam range for the first segment."
 
     def _start_new_exam_session(self, trial_count: int) -> None:
         self.state.exam_total_trials = trial_count
-        self.state.exam_current_trial = 1
+        self.state.exam_current_trial = 0
+        self.state.exam_active_segment_end = None
         self.state.exam_recording = False
         self.state.exam_waiting_for_save = False
+        self.state.exam_phase = ExamTrialPhase.IDLE
+        self.state.exam_range_confirmed = False
         self.state.exam_trial_start_time = None
-        self.state.exam_last_sample_time = None
         self.state.exam_current_points = []
+        self.state.exam_current_start_point = None
+        self.state.exam_current_target_point = None
+        self.state.exam_current_end_point = None
+        self.state.exam_segments = []
         self.state.exam_trials = []
         self.state.last_exam_file = None
 
@@ -482,66 +513,174 @@ class ShoulderMeasurementApp:
         return (
             self.state.exam_total_trials > 0
             or self.state.exam_current_trial > 0
+            or self.state.exam_active_segment_end is not None
+            or bool(self.state.exam_segments)
             or bool(self.state.exam_trials)
             or self.state.exam_waiting_for_save
         )
 
+    def _find_exam_segment(self, segment_end: int) -> Optional[ExamSegmentRecord]:
+        for segment in self.state.exam_segments:
+            if segment.segment_end == segment_end:
+                return segment
+        return None
+
+    def _ensure_exam_segment(self, segment_end: int) -> ExamSegmentRecord:
+        existing = self._find_exam_segment(segment_end)
+        if existing is not None:
+            return existing
+        segment = ExamSegmentRecord(segment_end=segment_end)
+        self.state.exam_segments.append(segment)
+        return segment
+
     def _exam_status_message(self) -> str:
         if self.state.exam_waiting_for_save:
-            return "Exam complete. Use Save Exam to export the Excel file."
-        if self.state.exam_recording:
-            return "Exam trial {0} is recording.".format(self.state.exam_current_trial)
-        if self.state.exam_current_trial > 0 and self.state.exam_total_trials > 0:
-            return "Exam mode active. Trial {0} of {1} is ready.".format(
+            return "Current segment complete. Choose the next exam range or use Save Exam."
+        if self.state.exam_phase == ExamTrialPhase.RECORDING_TO_TARGET:
+            return "Exam trial {0} is recording. Press Space to mark the target point.".format(
+                self.state.exam_current_trial,
+            )
+        if self.state.exam_phase == ExamTrialPhase.RECORDING_TO_END:
+            return "Exam trial {0} target marked. Press Space to finish the trial.".format(
+                self.state.exam_current_trial,
+            )
+        if (
+            self.state.exam_active_segment_end is not None
+            and self.state.exam_current_trial > 0
+            and self.state.exam_total_trials > 0
+        ):
+            return "Exam mode active. Segment {0}, trial {1} of {2} is ready for the start point.".format(
+                self.state.exam_active_segment_end,
                 self.state.exam_current_trial,
                 self.state.exam_total_trials,
             )
+        if self.state.exam_total_trials > 0:
+            return "Exam mode active. Choose the exam range to start the next segment."
         return "Exam mode active."
 
     def handle_exam_action(self) -> None:
         if self.state.mode != AppMode.EXAM:
             self.state.latest_message = "Enable Exam mode before recording trials."
             return
+        if not self.state.exam_range_confirmed:
+            self.state.latest_message = "Set the Exam range before starting the trial."
+            return
+        if self.state.exam_active_segment_end is None:
+            self.state.latest_message = "Choose the exam range before starting the trial."
+            return
         if not self._exam_session_exists():
             self.state.latest_message = "Start an exam session before recording trials."
             return
         if self.state.exam_waiting_for_save:
-            self.state.latest_message = "All trials are complete. Use Save Exam to export the Excel file."
+            self.state.exam_waiting_for_save = False
+        point = self.state.detection.screen_point
+        if point is None:
+            self.state.latest_message = "No valid projected point is available to mark for the exam trial."
             return
 
-        if not self.state.exam_recording:
+        if self.state.exam_phase in (ExamTrialPhase.IDLE, ExamTrialPhase.READY_TO_START):
+            start_perf = perf_counter()
             self.state.exam_recording = True
+            self.state.exam_phase = ExamTrialPhase.RECORDING_TO_TARGET
             self.state.exam_current_points = []
-            self.state.exam_trial_start_time = perf_counter()
-            self.state.exam_last_sample_time = None
-            self._capture_exam_trial_point()
-            self.state.latest_message = "Exam trial {0} recording started.".format(self.state.exam_current_trial)
+            self.state.exam_trial_start_time = start_perf
+            self.state.exam_current_start_point = point
+            self.state.exam_current_target_point = None
+            self.state.exam_current_end_point = None
+            self._append_exam_point(point, start_perf)
+            self.state.latest_message = "Exam segment {0}, trial {1} start point marked. Press Space again to mark the target point.".format(
+                self.state.exam_active_segment_end,
+                self.state.exam_current_trial,
+            )
             return
 
+        if self.state.exam_phase == ExamTrialPhase.RECORDING_TO_TARGET:
+            target_perf = perf_counter()
+            self._append_exam_point(point, target_perf)
+            self.state.exam_current_target_point = point
+            self.state.exam_phase = ExamTrialPhase.RECORDING_TO_END
+            self.state.latest_message = "Exam segment {0}, trial {1} target point marked. Press Space again to finish the trial.".format(
+                self.state.exam_active_segment_end,
+                self.state.exam_current_trial,
+            )
+            return
+
+        if self.state.exam_phase != ExamTrialPhase.RECORDING_TO_END:
+            self.state.latest_message = "Current exam trial is not ready for the next mark."
+            return
+
+        end_perf = perf_counter()
         total_time = 0.0
         if self.state.exam_trial_start_time is not None:
-            total_time = perf_counter() - self.state.exam_trial_start_time
-        self._capture_exam_trial_point()
+            total_time = end_perf - self.state.exam_trial_start_time
+        self._append_exam_point(point, end_perf)
+        self.state.exam_current_end_point = point
+        target_time_s = None
+        if self.state.exam_current_target_point is not None and self.state.exam_current_points:
+            target_record = next(
+                (
+                    record
+                    for record in reversed(self.state.exam_current_points)
+                    if (record.x, record.y) == self.state.exam_current_target_point
+                ),
+                None,
+            )
+            if target_record is not None:
+                target_time_s = target_record.time_s
         trial_record = ExamTrialRecord(
             trial_index=self.state.exam_current_trial,
             points=self.state.exam_current_points[:],
             total_time_s=total_time,
+            start_point=self.state.exam_current_start_point,
+            start_time_s=0.0 if self.state.exam_current_start_point is not None else None,
+            target_point=self.state.exam_current_target_point,
+            target_time_s=target_time_s,
+            end_point=self.state.exam_current_end_point,
+            end_time_s=total_time,
         )
-        self.state.exam_trials.append(trial_record)
+        self._apply_single_trial_errors(self.state.exam_active_segment_end, trial_record)
+        active_segment = self._ensure_exam_segment(self.state.exam_active_segment_end)
+        active_segment.trials.append(trial_record)
+        self.state.exam_trials = active_segment.trials
+        self._update_latest_exam_error_state(self.state.exam_active_segment_end, trial_record)
         self.state.exam_recording = False
         self.state.exam_trial_start_time = None
-        self.state.exam_last_sample_time = None
         self.state.exam_current_points = []
+        self.state.exam_current_start_point = None
+        self.state.exam_current_target_point = None
+        self.state.exam_current_end_point = None
 
         if self.state.exam_current_trial >= self.state.exam_total_trials:
             self.state.exam_waiting_for_save = True
-            self.state.latest_message = "All exam trials are complete. Use Save Exam to export the Excel file."
+            completed_segment = self.state.exam_active_segment_end
+            self.state.exam_phase = ExamTrialPhase.WAITING_TO_SAVE
+            self.state.exam_active_segment_end = None
+            self.state.exam_range_confirmed = False
+            self.state.exam_current_trial = 0
+            self.state.latest_message = (
+                "Exam segment {0} complete. Trial {1} errors: start {2}, target {3}, end {4}. "
+                "Choose the next range or use Save Exam."
+            ).format(
+                completed_segment,
+                trial_record.trial_index,
+                self._format_error_value(trial_record.start_error_cm),
+                self._format_error_value(trial_record.target_error_cm),
+                self._format_error_value(trial_record.end_error_cm),
+            )
             return
 
         completed_trial = self.state.exam_current_trial
         self.state.exam_current_trial += 1
-        self.state.latest_message = "Exam trial {0} complete. Trial {1} is ready.".format(
+        self.state.exam_phase = ExamTrialPhase.READY_TO_START
+        self.state.latest_message = (
+            "Exam segment {0}, trial {1} complete. Errors: start {2}, target {3}, end {4}. "
+            "Trial {5} is ready for the start point."
+        ).format(
+            self.state.exam_active_segment_end,
             completed_trial,
+            self._format_error_value(trial_record.start_error_cm),
+            self._format_error_value(trial_record.target_error_cm),
+            self._format_error_value(trial_record.end_error_cm),
             self.state.exam_current_trial,
         )
 
@@ -550,37 +689,63 @@ class ShoulderMeasurementApp:
             self.state.latest_message = "No exam session is active."
             return
         if self.state.exam_waiting_for_save:
-            if not self.state.exam_trials:
+            if not self.state.exam_segments:
+                self.state.latest_message = "No completed exam segment is available to reset."
+                return
+            segment = self.state.exam_segments[-1]
+            if not segment.trials:
                 self.state.latest_message = "No completed exam trial is available to reset."
                 return
-            removed_trial = self.state.exam_trials.pop()
+            removed_trial = segment.trials.pop()
             self.state.exam_waiting_for_save = False
+            self.state.exam_active_segment_end = segment.segment_end
+            self.state.exam_segment_end = segment.segment_end
+            self.state.exam_range_confirmed = True
             self.state.exam_current_trial = removed_trial.trial_index
             self.state.exam_recording = False
+            self.state.exam_phase = ExamTrialPhase.READY_TO_START
             self.state.exam_trial_start_time = None
-            self.state.exam_last_sample_time = None
             self.state.exam_current_points = []
-            self.state.latest_message = "Exam trial {0} reset. Ready to record again.".format(
+            self.state.exam_current_start_point = None
+            self.state.exam_current_target_point = None
+            self.state.exam_current_end_point = None
+            if not segment.trials:
+                self.state.exam_segments.pop()
+            self.state.exam_trials = segment.trials
+            self.state.latest_message = "Exam segment {0}, trial {1} reset. Ready to record again.".format(
+                self.state.exam_active_segment_end,
                 removed_trial.trial_index,
             )
             return
 
         if self.state.exam_recording:
             self.state.exam_recording = False
+            self.state.exam_phase = ExamTrialPhase.READY_TO_START
             self.state.exam_trial_start_time = None
-            self.state.exam_last_sample_time = None
             self.state.exam_current_points = []
-            self.state.latest_message = "Current exam trial {0} reset.".format(self.state.exam_current_trial)
+            self.state.exam_current_start_point = None
+            self.state.exam_current_target_point = None
+            self.state.exam_current_end_point = None
+            self.state.latest_message = "Current exam segment {0}, trial {1} reset.".format(
+                self.state.exam_active_segment_end,
+                self.state.exam_current_trial,
+            )
             return
 
-        if self.state.exam_trials:
-            removed_trial = self.state.exam_trials.pop()
+        active_segment = self._find_exam_segment(self.state.exam_active_segment_end) if self.state.exam_active_segment_end is not None else None
+        if active_segment and active_segment.trials:
+            removed_trial = active_segment.trials.pop()
             self.state.exam_current_trial = removed_trial.trial_index
             self.state.exam_recording = False
+            self.state.exam_phase = ExamTrialPhase.READY_TO_START
             self.state.exam_trial_start_time = None
-            self.state.exam_last_sample_time = None
             self.state.exam_current_points = []
-            self.state.latest_message = "Exam trial {0} reset. Ready to record again.".format(
+            self.state.exam_current_start_point = None
+            self.state.exam_current_target_point = None
+            self.state.exam_current_end_point = None
+            self.state.exam_trials = active_segment.trials
+            self.state.latest_message = "Exam segment {0}, trial {1} reset. Ready to record again.".format(
+                self.state.exam_active_segment_end,
                 removed_trial.trial_index,
             )
             return
@@ -590,10 +755,16 @@ class ShoulderMeasurementApp:
             return
 
         self.state.exam_recording = False
+        self.state.exam_phase = ExamTrialPhase.READY_TO_START
         self.state.exam_trial_start_time = None
-        self.state.exam_last_sample_time = None
         self.state.exam_current_points = []
-        self.state.latest_message = "Current exam trial {0} reset.".format(self.state.exam_current_trial)
+        self.state.exam_current_start_point = None
+        self.state.exam_current_target_point = None
+        self.state.exam_current_end_point = None
+        self.state.latest_message = "Current exam segment {0}, trial {1} reset.".format(
+            self.state.exam_active_segment_end,
+            self.state.exam_current_trial,
+        )
 
     def mark_current_point(self) -> None:
         if self.state.mode != AppMode.MEASUREMENT:
@@ -609,7 +780,6 @@ class ShoulderMeasurementApp:
             self.state.start_point = point
             self.state.end_point = None
             self.state.phase = MeasurementPhase.START_MARKED
-            self.state.measurement_last_sample_time = None
             self.state.raw_path_points = [point]
             self.state.filtered_path_points = []
             self.state.last_path_file = None
@@ -634,8 +804,13 @@ class ShoulderMeasurementApp:
         self.state.phase = MeasurementPhase.IDLE
         self.state.raw_path_points = []
         self.state.filtered_path_points = []
-        self.state.measurement_last_sample_time = None
         self.state.last_path_file = None
+        self.state.exam_range_confirmed = False
+        self.state.latest_exam_error_segment = None
+        self.state.latest_exam_error_trial = None
+        self.state.latest_exam_start_error_cm = None
+        self.state.latest_exam_target_error_cm = None
+        self.state.latest_exam_end_error_cm = None
         self.state.latest_message = "Measurement path reset."
 
     def _finalize_measurement_path(self) -> None:
@@ -648,7 +823,6 @@ class ShoulderMeasurementApp:
             outlier_multiplier=self.config.paths.outlier_multiplier,
             minimum_jump_threshold=self.config.paths.minimum_jump_threshold,
             smoothing_window=self.config.paths.smoothing_window,
-            resample_points_count=self.config.paths.resample_points,
         )
         self.state.filtered_path_points = filtered_path if filtered_path else self.state.raw_path_points[:]
         if self.state.start_point is not None and self.state.filtered_path_points:
@@ -689,25 +863,122 @@ class ShoulderMeasurementApp:
             self.state.latest_message = "Please set the subject folder before saving the exam."
             self.dialogs.show_warning("Subject Folder", "Please choose or create a subject folder first.")
             return
-        if not self.state.exam_waiting_for_save or not self.state.exam_trials:
-            self.state.latest_message = "Complete the full exam session before saving the Excel file."
+        if self.state.exam_recording:
+            self.state.latest_message = "Finish or reset the current exam trial before saving."
             return
+        if self.state.exam_active_segment_end is not None:
+            self.state.latest_message = "Finish the current segment before saving the Excel file."
+            return
+        if not self.state.exam_segments:
+            self.state.latest_message = "Complete at least one exam segment before saving the Excel file."
+            return
+        if not self.state.filtered_path_points or self.state.start_point is None or self.state.end_point is None:
+            self.state.latest_message = "No saved path is available for exam error calculation."
+            return
+
+        self._apply_exam_errors()
 
         timestamp = datetime.now()
         save_path = self.state.subject_directory / "{0}_data.xlsx".format(timestamp.strftime("%Y%m%d_%H%M%S"))
-        self.state.last_exam_file = save_exam_trials_workbook(save_path, self.state.exam_trials)
+        reference_path_points = self.state.filtered_path_points or self.state.raw_path_points
+        self.state.last_exam_file = save_exam_trials_workbook(
+            save_path,
+            self.state.exam_segments,
+            reference_path_points,
+        )
+        self.dialogs.show_info("Exam Errors", self._build_exam_error_summary())
         self.state.latest_message = "Exam saved to {0}.".format(self.state.last_exam_file.name)
         self._clear_exam_session()
 
+    def _apply_exam_errors(self) -> None:
+        reference_start = self.state.start_point
+        reference_end = self.state.start_point
+        cm_per_px = self.state.scale_cm / max(self.config.screen.scale_bar_pixels, 1)
+
+        for segment in self.state.exam_segments:
+            target_fraction = segment.segment_end / float(max(self.state.segment_count, 1))
+            reference_target = sample_point_at_fraction(self.state.filtered_path_points, target_fraction)
+            for trial in segment.trials:
+                trial.start_error_cm = self._point_error_cm(reference_start, trial.start_point, cm_per_px)
+                trial.target_error_cm = self._point_error_cm(reference_target, trial.target_point, cm_per_px)
+                trial.end_error_cm = self._point_error_cm(reference_end, trial.end_point, cm_per_px)
+
+    def _point_error_cm(
+        self,
+        reference_point: Optional[tuple[int, int]],
+        trial_point: Optional[tuple[int, int]],
+        cm_per_px: float,
+    ) -> Optional[float]:
+        if reference_point is None or trial_point is None:
+            return None
+        return point_distance(reference_point, trial_point) * cm_per_px
+
+    def _build_exam_error_summary(self) -> str:
+        lines: list[str] = []
+        for segment in self.state.exam_segments:
+            lines.append("Segment {0}".format(segment.segment_end))
+            for trial in segment.trials:
+                lines.append(
+                    "  Trial {0}: start {1}, target {2}, end {3}".format(
+                        trial.trial_index,
+                        self._format_error_value(trial.start_error_cm),
+                        self._format_error_value(trial.target_error_cm),
+                        self._format_error_value(trial.end_error_cm),
+                    )
+                )
+        return "\n".join(lines)
+
+    def _format_error_value(self, value: Optional[float]) -> str:
+        if value is None:
+            return "N/A"
+        return "{0:.3f} cm".format(value)
+
+    def _apply_single_trial_errors(self, segment_end: int, trial: ExamTrialRecord) -> None:
+        if self.state.start_point is None or not self.state.filtered_path_points:
+            trial.start_error_cm = None
+            trial.target_error_cm = None
+            trial.end_error_cm = None
+            return
+
+        cm_per_px = self.state.scale_cm / max(self.config.screen.scale_bar_pixels, 1)
+        reference_start = self.state.start_point
+        reference_target = sample_point_at_fraction(
+            self.state.filtered_path_points,
+            segment_end / float(max(self.state.segment_count, 1)),
+        )
+        reference_end = self.state.start_point
+
+        trial.start_error_cm = self._point_error_cm(reference_start, trial.start_point, cm_per_px)
+        trial.target_error_cm = self._point_error_cm(reference_target, trial.target_point, cm_per_px)
+        trial.end_error_cm = self._point_error_cm(reference_end, trial.end_point, cm_per_px)
+
+    def _update_latest_exam_error_state(self, segment_end: int, trial: ExamTrialRecord) -> None:
+        self.state.latest_exam_error_segment = segment_end
+        self.state.latest_exam_error_trial = trial.trial_index
+        self.state.latest_exam_start_error_cm = trial.start_error_cm
+        self.state.latest_exam_target_error_cm = trial.target_error_cm
+        self.state.latest_exam_end_error_cm = trial.end_error_cm
+
     def _clear_exam_session(self) -> None:
         self.state.exam_total_trials = 0
+        self.state.exam_active_segment_end = None
         self.state.exam_current_trial = 0
         self.state.exam_recording = False
         self.state.exam_waiting_for_save = False
+        self.state.exam_phase = ExamTrialPhase.IDLE
+        self.state.exam_range_confirmed = False
         self.state.exam_trial_start_time = None
-        self.state.exam_last_sample_time = None
         self.state.exam_current_points = []
+        self.state.exam_current_start_point = None
+        self.state.exam_current_target_point = None
+        self.state.exam_current_end_point = None
+        self.state.exam_segments = []
         self.state.exam_trials = []
+        self.state.latest_exam_error_segment = None
+        self.state.latest_exam_error_trial = None
+        self.state.latest_exam_start_error_cm = None
+        self.state.latest_exam_target_error_cm = None
+        self.state.latest_exam_end_error_cm = None
 
 
 def main() -> None:

@@ -104,27 +104,11 @@ def sample_point_at_fraction(points: list[Point], fraction: float) -> Optional[P
     return points[-1]
 
 
-def resample_path(points: list[Point], target_points: int) -> list[Point]:
-    points = dedupe_consecutive_points(points)
-    if len(points) <= 1:
-        return points[:]
-
-    target_points = max(target_points, 2)
-    sampled: list[Point] = []
-    for index in range(target_points):
-        fraction = index / float(target_points - 1)
-        point = sample_point_at_fraction(points, fraction)
-        if point is not None:
-            sampled.append(point)
-    return dedupe_consecutive_points(sampled)
-
-
 def process_measurement_path(
     points: list[Point],
     outlier_multiplier: float,
     minimum_jump_threshold: float,
     smoothing_window: int,
-    resample_points_count: int,
 ) -> list[Point]:
     filtered = filter_extreme_points(points, outlier_multiplier, minimum_jump_threshold)
     smoothed = smooth_path(filtered, smoothing_window)

@@ -10,7 +10,7 @@ import numpy as np
 
 from .camera_panel import SETTING_SPECS
 from .config import CalibrationConfig, ScreenConfig
-from .models import AppMode, AppState, ControlPanelLayout, MeasurementMetrics, MeasurementPhase, Point, Rect
+from .models import AppMode, AppState, ControlPanelLayout, ExamTrialPhase, MeasurementMetrics, MeasurementPhase, Point, Rect
 from .path_tools import sample_point_at_fraction, slice_path_by_percentage
 from .vision import calibration_marker_layout
 
@@ -74,6 +74,7 @@ def render_control_view(
     layout = draw_mode_tabs_and_actions(control_view, state, width)
     draw_measurement_prompt(control_view, state, width, height)
     draw_operator_help(control_view, state, width, height)
+    draw_exam_error_panel(control_view, state, width, height)
     return control_view, layout
 
 
@@ -349,10 +350,11 @@ def draw_operator_help(control_view: np.ndarray, state: AppState, width: int, he
         ])
     else:
         lines.extend([
-            "Exam: Space starts and stops the current trial.",
+            "Exam: Space marks start, then target, then end.",
             "Reset Trial clears only the current trial in progress.",
             "Save Exam exports the Excel file after all trials finish.",
             "Exam range: START to segment {0}".format(state.exam_segment_end),
+            "Exam range set: {0}".format("Yes" if state.exam_range_confirmed else "No"),
             "Trial status: {0}".format(exam_status_line(state)),
         ])
 
@@ -374,14 +376,51 @@ def draw_operator_help(control_view: np.ndarray, state: AppState, width: int, he
         )
 
 
+def draw_exam_error_panel(control_view: np.ndarray, state: AppState, width: int, height: int) -> None:
+    if state.mode != AppMode.EXAM and state.latest_exam_error_trial is None:
+        return
+    if state.latest_exam_error_trial is None or state.latest_exam_error_segment is None:
+        return
+
+    lines = [
+        "Segment {0}, Trial {1}".format(
+            state.latest_exam_error_segment,
+            state.latest_exam_error_trial,
+        ),
+        "Start error: {0}".format(format_error_value(state.latest_exam_start_error_cm)),
+        "Target error: {0}".format(format_error_value(state.latest_exam_target_error_cm)),
+        "End error: {0}".format(format_error_value(state.latest_exam_end_error_cm)),
+    ]
+    box_width = min(360, width - 40)
+    box_height = 40 + len(lines) * 24
+    box_rect = (width - box_width - 20, 20, width - 20, 20 + box_height)
+    draw_filled_rect(control_view, box_rect, (24, 38, 24), 0.84)
+    cv2.rectangle(control_view, (box_rect[0], box_rect[1]), (box_rect[2], box_rect[3]), (170, 220, 170), 1)
+    cv2.putText(control_view, "Exam Trial Error", (box_rect[0] + 14, box_rect[1] + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
+    for index, line in enumerate(lines):
+        cv2.putText(
+            control_view,
+            line,
+            (box_rect[0] + 14, box_rect[1] + 50 + index * 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (220, 255, 220),
+            1,
+        )
+
+
 def measurement_phase_text(state: AppState) -> str:
     if state.mode == AppMode.EXAM:
         if state.exam_waiting_for_save:
             return "Exam complete"
-        if state.exam_recording:
-            return "Exam recording: Trial {0}".format(state.exam_current_trial)
+        if not state.exam_range_confirmed:
+            return "Exam: set RANGE first"
+        if state.exam_phase == ExamTrialPhase.RECORDING_TO_TARGET:
+            return "Exam: mark TARGET"
+        if state.exam_phase == ExamTrialPhase.RECORDING_TO_END:
+            return "Exam: mark END"
         if state.exam_total_trials > 0 and state.exam_current_trial > 0:
-            return "Exam ready: Trial {0} of {1}".format(state.exam_current_trial, state.exam_total_trials)
+            return "Exam ready: mark START"
         return "Select Exam mode to start"
     if state.mode == AppMode.PRACTICE:
         return "Practice mode active"
@@ -400,18 +439,36 @@ def operator_hint_text(state: AppState) -> str:
     if state.mode == AppMode.PRACTICE:
         return "Subject action: follow the displayed path."
     if state.mode == AppMode.EXAM:
-        return "Subject action: press Space to start or stop a trial."
+        if not state.exam_range_confirmed:
+            return "Operator action: choose Exam range before recording."
+        return "Subject action: press Space for START, TARGET, END."
     return "Operator action: set calibration, scale, and subject folder."
 
 
 def exam_status_line(state: AppState) -> str:
     if state.exam_waiting_for_save:
         return "All trials complete, waiting for Save Exam"
-    if state.exam_recording:
-        return "Recording trial {0}/{1}".format(state.exam_current_trial, state.exam_total_trials)
+    if not state.exam_range_confirmed:
+        return "Waiting for Exam range selection"
+    if state.exam_phase == ExamTrialPhase.RECORDING_TO_TARGET:
+        return "Trial {0}/{1}: waiting for target point".format(
+            state.exam_current_trial,
+            state.exam_total_trials,
+        )
+    if state.exam_phase == ExamTrialPhase.RECORDING_TO_END:
+        return "Trial {0}/{1}: waiting for end point".format(
+            state.exam_current_trial,
+            state.exam_total_trials,
+        )
     if state.exam_total_trials > 0 and state.exam_current_trial > 0:
-        return "Ready for trial {0}/{1}".format(state.exam_current_trial, state.exam_total_trials)
+        return "Trial {0}/{1}: ready for start point".format(state.exam_current_trial, state.exam_total_trials)
     return "No active exam session"
+
+
+def format_error_value(value: Optional[float]) -> str:
+    if value is None:
+        return "N/A"
+    return "{0:.3f} cm".format(value)
 
 
 def draw_filled_rect(image: np.ndarray, rect: Rect, color: tuple[int, int, int], alpha: float) -> None:
