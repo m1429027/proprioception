@@ -60,6 +60,7 @@ class TrackbarDefaults:
     min_brightness: int = 230
     min_area: int = 5
     ignore_bottom: int = 100
+    stability: int = 3
 
     def as_pairs(self) -> list[tuple[str, int, int]]:
         return [

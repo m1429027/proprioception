@@ -50,6 +50,7 @@ class CameraSettings:
     min_brightness: int
     min_area: int
     ignore_bottom: int
+    stability: int
     panel_visible: bool = False
 
     def to_trackbar_values(self) -> TrackbarValues:
@@ -210,6 +211,8 @@ class AppState:
     segment_count: int
     camera_settings: CameraSettings
     detection: DetectionResult
+    smoothed_camera_point: Optional[Tuple[float, float]] = None
+    smoothed_screen_point: Optional[Tuple[float, float]] = None
     raw_path_points: list[Point] = field(default_factory=list)
     filtered_path_points: list[Point] = field(default_factory=list)
     practice_segment_end: int = 1

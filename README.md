@@ -127,6 +127,7 @@
 4. 進入 `Initial` 模式。
 5. 設定 `Subject`（受試者資料夾）。
 6. 必要時開啟 `Settings` 調整相機參數。
+7. 若紅點框有小幅飄動，可在 `Settings` 中調整 `Stability`（穩定度）。
 
 ### 校正
 
@@ -263,6 +264,26 @@
 
 ## 安裝與執行
 
+### 建議交接方式
+
+目前最建議在新的 Windows 電腦上使用：
+
+- `Conda`（Python 環境管理工具）建立獨立環境
+- 再用 `pip install -r requirements.txt`
+
+本專案目前實際驗證的 Python 版本為：
+
+- `Python 3.8`
+
+### 使用 `conda`（建議）
+
+```powershell
+conda create -n position python=3.8 -y
+conda activate position
+pip install -r requirements.txt
+python Demo.py
+```
+
 ### 使用 `uv`（Python 環境工具）
 
 ```powershell
@@ -286,6 +307,20 @@ python Demo.py
 - 調整 `Min Bright`
 - 調整 `Min Area`
 - 調整 `Ignore Bot`
+- 若紅點沒動但偵測框仍浮動，可調整 `Stability`
+
+### Stability 說明
+
+`Settings` 內的 `Stability` 用來控制紅點框的穩定度，範圍為 `1 ~ 5`。
+
+- `1`：較靈敏，框比較跟手，但也比較容易抖
+- `3`：平衡，適合一般使用
+- `5`：較穩定，框比較不會飄，但移動時會稍微比較黏
+
+若遇到：
+
+- 雷射點固定不動，但框一直小幅浮動：把 `Stability` 調高
+- 雷射點移動時，框感覺太慢、太黏：把 `Stability` 調低
 
 ### 校正失敗
 

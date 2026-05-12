@@ -37,9 +37,18 @@ from .vision import (
     apply_camera_controls,
     build_aruco,
     compute_calibration_homography,
+    camera_to_screen,
     detect_laser,
     open_camera,
 )
+
+STABILITY_PROFILES = {
+    1: (0.55, 1.0, 2.0),
+    2: (0.45, 1.5, 2.5),
+    3: (0.35, 2.0, 3.0),
+    4: (0.25, 3.0, 4.0),
+    5: (0.18, 4.0, 5.0),
+}
 
 
 class ShoulderMeasurementApp:
@@ -114,6 +123,7 @@ class ShoulderMeasurementApp:
                     self.state.homography_matrix,
                     self.config.screen,
                 )
+                self._stabilize_detection(detection)
                 self.state.detection = detection
                 self._capture_measurement_path_point()
                 self._capture_exam_trial_point()
@@ -365,6 +375,81 @@ class ShoulderMeasurementApp:
 
         now = perf_counter()
         self._append_exam_point(point, now)
+
+    def _stabilize_detection(self, detection: DetectionResult) -> None:
+        if detection.camera_point is None:
+            self.state.smoothed_camera_point = None
+            self.state.smoothed_screen_point = None
+            return
+
+        alpha, camera_deadzone, screen_deadzone = self._stability_profile()
+
+        smoothed_camera = self._smooth_point(
+            self.state.smoothed_camera_point,
+            detection.camera_point,
+            alpha,
+            camera_deadzone,
+        )
+        self.state.smoothed_camera_point = smoothed_camera
+        detection.camera_point = smoothed_camera
+
+        if self.state.homography_matrix is not None:
+            projected = camera_to_screen(smoothed_camera, self.state.homography_matrix)
+            if projected is None:
+                detection.screen_point = None
+                detection.in_screen_bounds = False
+                self.state.smoothed_screen_point = None
+                return
+
+            px, py = projected
+            in_bounds = 0 <= px < self.config.screen.width and 0 <= py < self.config.screen.height
+            detection.in_screen_bounds = in_bounds
+            if not in_bounds:
+                detection.screen_point = None
+                self.state.smoothed_screen_point = None
+                return
+
+            smoothed_screen = self._smooth_point(
+                self.state.smoothed_screen_point,
+                (float(px), float(py)),
+                alpha,
+                screen_deadzone,
+            )
+            self.state.smoothed_screen_point = smoothed_screen
+            detection.screen_point = (
+                int(round(smoothed_screen[0])),
+                int(round(smoothed_screen[1])),
+            )
+            return
+
+        detection.in_screen_bounds = False
+        detection.screen_point = None
+        self.state.smoothed_screen_point = None
+
+    def _stability_profile(self) -> tuple[float, float, float]:
+        level = max(1, min(5, int(self.state.camera_settings.stability)))
+        return STABILITY_PROFILES.get(level, STABILITY_PROFILES[3])
+
+    def _smooth_point(
+        self,
+        previous: Optional[tuple[float, float]],
+        current: tuple[float, float],
+        alpha: float,
+        deadzone_px: float,
+    ) -> tuple[float, float]:
+        if previous is None:
+            return float(current[0]), float(current[1])
+
+        dx = float(current[0]) - previous[0]
+        dy = float(current[1]) - previous[1]
+        distance = (dx * dx + dy * dy) ** 0.5
+        if distance <= deadzone_px:
+            return previous
+
+        return (
+            previous[0] * (1.0 - alpha) + float(current[0]) * alpha,
+            previous[1] * (1.0 - alpha) + float(current[1]) * alpha,
+        )
 
     def _append_exam_point(self, point: tuple[int, int], perf_time: float) -> None:
         if self.state.exam_trial_start_time is None:
